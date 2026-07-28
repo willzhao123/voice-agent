@@ -1,12 +1,12 @@
 import { buildApp } from "./app.js";
-import { config } from "./config.js";
+import { env } from "./config/env.js";
 
 const app = await buildApp();
 
 try {
   await app.listen({
-    host: config.HOST,
-    port: config.PORT,
+    host: env.HOST,
+    port: env.PORT,
   });
 } catch (error) {
   app.log.error(error);
