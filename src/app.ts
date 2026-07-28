@@ -1,3 +1,4 @@
+import formbody from "@fastify/formbody";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import Fastify, { type FastifyInstance } from "fastify";
@@ -7,6 +8,15 @@ import { VoiceSessionManager } from "./application/voiceSessionManager.js";
 import { MockRealtimeProvider } from "./adapters/realtime/mockRealtimeProvider.js";
 import { OpenAIRealtimeProvider } from "./adapters/realtime/openaiRealtimeProvider.js";
 import { MemorySessionStore } from "./adapters/storage/memorySessionStore.js";
+import {
+  registerTwilioMediaStreamRoute,
+  type TwilioMediaStreamRouteOptions,
+} from "./adapters/twilio/twilioMediaStreamRoute.js";
+import {
+  DefaultTwilioSignatureValidator,
+  type TwilioSignatureValidator,
+} from "./adapters/twilio/twilioSignatureValidator.js";
+import { registerTwilioVoiceRoute } from "./adapters/twilio/twilioVoiceRoute.js";
 import {
   registerVoiceWebsocketRoute,
   type VoiceWebsocketOptions,
@@ -24,6 +34,14 @@ export interface AppDependencies {
   realtimeProvider?: RealtimeProvider;
   sessionStore?: SessionStore;
   voiceWebsocketOptions?: Partial<VoiceWebsocketOptions>;
+  twilioSignatureValidator?: TwilioSignatureValidator;
+  twilioPublicBaseUrl?: string;
+  twilioMediaStreamOptions?: Partial<
+    Pick<
+      TwilioMediaStreamRouteOptions,
+      "maxMessageBytes" | "maxPendingMessages" | "maxBufferedBytes"
+    >
+  >;
 }
 
 function createRealtimeProvider(): RealtimeProvider {
@@ -56,6 +74,12 @@ export async function buildApp(
     sessionStore,
     logger,
   );
+  const twilioSignatureValidator =
+    dependencies.twilioSignatureValidator ??
+    new DefaultTwilioSignatureValidator(env.TWILIO_AUTH_TOKEN);
+  const twilioPublicBaseUrl =
+    dependencies.twilioPublicBaseUrl ??
+    env.TWILIO_PUBLIC_BASE_URL;
 
   await app.register(websocket, {
     options: {
@@ -65,6 +89,7 @@ export async function buildApp(
       ),
     },
   });
+  await app.register(formbody);
   await app.register(fastifyStatic, {
     root: resolve("public"),
   });
@@ -97,6 +122,27 @@ export async function buildApp(
       maxPendingMessages: env.WEBSOCKET_MAX_PENDING_MESSAGES,
       maxBufferedBytes: env.WEBSOCKET_MAX_BUFFERED_BYTES,
       ...dependencies.voiceWebsocketOptions,
+    },
+  );
+  registerTwilioVoiceRoute(app, {
+    signatureValidator: twilioSignatureValidator,
+    ...(twilioPublicBaseUrl === undefined
+      ? {}
+      : { publicBaseUrl: twilioPublicBaseUrl }),
+  });
+  registerTwilioMediaStreamRoute(
+    app,
+    sessionManager,
+    {
+      signatureValidator: twilioSignatureValidator,
+      instructions: env.VOICE_INSTRUCTIONS,
+      maxMessageBytes: env.MAX_JSON_MESSAGE_BYTES,
+      maxPendingMessages: env.WEBSOCKET_MAX_PENDING_MESSAGES,
+      maxBufferedBytes: env.WEBSOCKET_MAX_BUFFERED_BYTES,
+      ...(twilioPublicBaseUrl === undefined
+        ? {}
+        : { publicBaseUrl: twilioPublicBaseUrl }),
+      ...dependencies.twilioMediaStreamOptions,
     },
   );
 

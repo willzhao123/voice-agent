@@ -113,6 +113,42 @@ function parseSentMessages(
 }
 
 describe("OpenAIRealtimeProvider", () => {
+  it("configures G.711 μ-law audio and server VAD for telephony", async () => {
+    const harness = createProviderHarness();
+    const session = await harness.provider.openSession(
+      {
+        sessionId: "twilio-voice-session",
+        audioFormat: {
+          encoding: "g711_ulaw",
+          sampleRate: 8_000,
+        },
+        turnDetection: "server_vad",
+      },
+      () => {},
+    );
+
+    expect(parseSentMessages(harness.socket)[0]).toMatchObject({
+      type: "session.update",
+      session: {
+        audio: {
+          input: {
+            format: { type: "audio/pcmu" },
+            turn_detection: {
+              type: "server_vad",
+              create_response: true,
+              interrupt_response: true,
+            },
+          },
+          output: {
+            format: { type: "audio/pcmu" },
+          },
+        },
+      },
+    });
+
+    await session.close();
+  });
+
   it("maps normalized commands to current OpenAI Realtime events", async () => {
     const harness = createProviderHarness();
     const events: RealtimeProviderEvent[] = [];

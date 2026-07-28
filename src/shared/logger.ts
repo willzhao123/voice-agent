@@ -18,6 +18,8 @@ export function createLoggerOptions(level: string): pino.LoggerOptions {
         "*.apiKey",
         "OPENAI_API_KEY",
         "*.OPENAI_API_KEY",
+        "TWILIO_AUTH_TOKEN",
+        "*.TWILIO_AUTH_TOKEN",
         "authorization",
         "*.authorization",
         "headers.authorization",

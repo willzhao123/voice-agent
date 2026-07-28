@@ -312,6 +312,10 @@ interface ProviderEvent {
 function createSessionUpdateEvent(
   options: RealtimeSessionOptions,
 ): object {
+  const audioFormat = options.audioFormat ?? {
+    encoding: "pcm16",
+    sampleRate: 24_000,
+  };
   return {
     type: "session.update",
     session: {
@@ -322,23 +326,36 @@ function createSessionUpdateEvent(
         : { instructions: options.instructions }),
       audio: {
         input: {
-          format: {
-            type: "audio/pcm",
-            rate: 24_000,
-          },
+          format: toOpenAIAudioFormat(audioFormat),
           transcription: {
             model: "gpt-4o-mini-transcribe",
           },
-          turn_detection: null,
+          turn_detection:
+            options.turnDetection === "server_vad"
+              ? {
+                  type: "server_vad",
+                  create_response: true,
+                  interrupt_response: true,
+                }
+              : null,
         },
         output: {
-          format: {
-            type: "audio/pcm",
-            rate: 24_000,
-          },
+          format: toOpenAIAudioFormat(audioFormat),
         },
       },
     },
+  };
+}
+
+function toOpenAIAudioFormat(
+  format: NonNullable<RealtimeSessionOptions["audioFormat"]>,
+): object {
+  if (format.encoding === "g711_ulaw") {
+    return { type: "audio/pcmu" };
+  }
+  return {
+    type: "audio/pcm",
+    rate: format.sampleRate,
   };
 }
 

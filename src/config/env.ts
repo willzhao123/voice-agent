@@ -23,6 +23,11 @@ const environmentSchema = z
       .default("info"),
     REALTIME_PROVIDER: z.enum(["mock", "openai"]).default("mock"),
     OPENAI_API_KEY: optionalSecretSchema,
+    TWILIO_AUTH_TOKEN: optionalSecretSchema,
+    TWILIO_PUBLIC_BASE_URL: z.preprocess(
+      (value) => value === "" ? undefined : value,
+      z.string().url().optional(),
+    ),
     OPENAI_REALTIME_MODEL: z
       .string()
       .trim()

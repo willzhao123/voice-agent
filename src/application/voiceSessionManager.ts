@@ -7,6 +7,7 @@ import {
   type VoiceSession,
 } from "../domain/voiceSession.js";
 import type {
+  RealtimeAudioFormat,
   RealtimeProvider,
   RealtimeProviderEvent,
   RealtimeSession,
@@ -41,6 +42,10 @@ export class VoiceSessionManager {
   async createSession(
     initialListener?: VoiceSessionEventListener,
     instructions?: string,
+    mediaOptions: {
+      audioFormat?: RealtimeAudioFormat;
+      turnDetection?: "manual" | "server_vad";
+    } = {},
   ): Promise<VoiceSession> {
     const session = createVoiceSession(await this.createUniqueId());
     const listeners = new Set<VoiceSessionEventListener>();
@@ -55,6 +60,7 @@ export class VoiceSessionManager {
         {
           sessionId: session.id,
           ...(instructions === undefined ? {} : { instructions }),
+          ...mediaOptions,
         },
         (event) => this.emit(session.id, event, listeners),
       );

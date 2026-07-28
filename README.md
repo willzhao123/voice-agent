@@ -19,6 +19,12 @@ VoiceSessionManager
   └── RealtimeProvider port
                          ├── mock adapter
                          └── OpenAI Realtime adapter ──► OpenAI
+
+Twilio incoming call
+  │  signed webhook ──► TwiML <Connect><Stream>
+  │  signed Media Stream WebSocket
+  ▼
+Twilio adapter ──► VoiceSessionManager
 ```
 
 The domain and application layers do not import OpenAI types, WebSocket types,
@@ -47,6 +53,11 @@ src/
       openaiRealtimeProvider.ts      # OpenAI Realtime protocol adapter
     storage/
       memorySessionStore.ts          # Process-local session persistence
+    twilio/
+      twilioVoiceRoute.ts            # Signed incoming-call webhook and TwiML
+      twilioMediaStreamRoute.ts      # Bidirectional Media Stream bridge
+      twilioMessages.ts              # Validated Twilio stream messages
+      twilioSignatureValidator.ts    # Twilio request authentication
     websocket/
       voiceWebsocketRoute.ts         # Validated public WebSocket protocol
   application/
@@ -80,6 +91,8 @@ Copy `.env.example` to `.env`. The local `.env` file is ignored by Git.
 | `REALTIME_PROVIDER` | `mock` | `mock` or `openai` |
 | `OPENAI_API_KEY` | unset | Server-only OpenAI credential; required for `openai` |
 | `OPENAI_REALTIME_MODEL` | `gpt-realtime-2.1` | OpenAI Realtime model name |
+| `TWILIO_AUTH_TOKEN` | unset | Server-only secret used to validate Twilio signatures |
+| `TWILIO_PUBLIC_BASE_URL` | unset | Public HTTPS origin Twilio uses for webhooks and Media Streams |
 | `VOICE_INSTRUCTIONS` | `You are a helpful voice assistant.` | Base instructions applied to every session |
 | `MAX_JSON_MESSAGE_BYTES` | `65536` | Maximum incoming JSON frame size |
 | `MAX_AUDIO_FRAME_BYTES` | `262144` | Maximum incoming binary audio-frame size |
@@ -89,10 +102,10 @@ Copy `.env.example` to `.env`. The local `.env` file is ignored by Git.
 | `WEBSOCKET_MAX_PENDING_MESSAGES` | `32` | Maximum queued incoming frames per connection |
 | `WEBSOCKET_MAX_BUFFERED_BYTES` | `1048576` | Maximum buffered outgoing WebSocket data |
 
-Environment values are validated at startup. The API key is used only by the
-server-side OpenAI adapter and is never included in browser assets or public
-protocol messages. Default logs redact common API-key and authorization fields;
-raw audio and full provider payloads are not logged.
+Environment values are validated at startup. Provider credentials are used only
+by server-side adapters and are never included in browser assets or public
+protocol messages. Default logs redact OpenAI and Twilio secrets plus common
+authorization fields; raw audio and full provider payloads are not logged.
 
 ## Local startup
 
@@ -117,6 +130,8 @@ Useful endpoints:
 - `GET /health` returns process health.
 - `GET /ready` verifies that the configured provider can initialize.
 - `GET /v1/voice` upgrades to the voice WebSocket protocol.
+- `POST /v1/twilio/voice` accepts signed incoming-call webhooks.
+- `GET /v1/twilio/media` upgrades signed Twilio Media Streams.
 - `GET /` serves the browser test client.
 
 For a non-watching process, use `npm start`. To compile TypeScript into `dist/`,
@@ -209,6 +224,46 @@ each chunk to 24 kHz, converts it to PCM16, and sends binary WebSocket frames.
 Assistant binary frames are decoded using the same PCM16/24 kHz assumption and
 scheduled for playback.
 
+## Twilio Programmable Voice
+
+Twilio support uses bidirectional Media Streams without changing the browser
+protocol:
+
+1. Configure a Twilio phone number's incoming-call webhook as
+   `POST https://your-public-host/v1/twilio/voice`.
+2. Set `TWILIO_AUTH_TOKEN` to that Twilio account's auth token.
+3. Set `TWILIO_PUBLIC_BASE_URL` to the externally visible HTTPS origin, such as
+   `https://voice.example.com`. This ensures signature validation uses the
+   exact URL Twilio signed when the application is behind a proxy.
+4. Set `REALTIME_PROVIDER=openai` and configure `OPENAI_API_KEY`.
+5. Expose the application over HTTPS/WSS on public port 443.
+
+The signed webhook returns TwiML containing:
+
+```xml
+<Response>
+  <Connect>
+    <Stream url="wss://your-public-host/v1/twilio/media"/>
+  </Connect>
+</Response>
+```
+
+Twilio then opens the signed Media Stream WebSocket. Its `start` event creates
+an isolated voice session configured for G.711 μ-law at 8 kHz and server-side
+voice activity detection. Incoming base64 media payloads are decoded and passed
+unchanged to the realtime provider. Provider audio deltas are encoded into
+Twilio `media` messages and sent back for call playback. Speech-start and
+interruption events send Twilio `clear` messages to discard buffered assistant
+audio. A Twilio `stop` event or WebSocket disconnect closes the realtime
+session.
+
+Twilio webhook and WebSocket signatures are validated with the server-only auth
+token. Neither Twilio nor OpenAI credentials are exposed to the browser.
+
+Twilio Media Streams require raw headerless `audio/x-mulaw` at 8 kHz. The
+OpenAI adapter selects `audio/pcmu` for both input and output, so this path does
+not transcode audio. Browser sessions continue to use PCM16/24 kHz.
+
 ## Selecting a realtime provider
 
 ### Mock provider
@@ -253,19 +308,23 @@ provider-specific event payloads.
 ## Known limitations
 
 - Session state is process-local and is lost on restart.
-- There is no authentication, authorization, tenant isolation, or distributed
-  rate limiting.
+- The browser development route has no authentication or tenant isolation.
+  Twilio routes validate Twilio signatures but do not add application-level
+  caller authorization.
 - The service is single-process; active sessions cannot migrate between
   instances.
-- Audio content is assumed to be PCM16/24 kHz after frame-size validation; the
-  server does not inspect or transcode its encoding.
+- Browser audio is assumed to be PCM16/24 kHz and Twilio audio is assumed to be
+  G.711 μ-law/8 kHz after message and frame validation. The server does not
+  transcode audio.
 - Browser capture uses the deprecated `ScriptProcessorNode` and performs simple
   per-chunk linear resampling rather than production-grade audio processing.
-- Turn detection is manual: stopping the microphone commits the audio buffer.
+- Browser turn detection is manual; Twilio sessions use OpenAI server VAD.
 - The mock provider verifies protocol flow and audio echoing but does not
   synthesize natural speech.
-- The OpenAI adapter targets its configured Realtime protocol and fixed 24 kHz
-  PCM format; provider API changes may require adapter updates.
+- The OpenAI adapter targets its configured Realtime protocol; provider API
+  changes may require adapter updates.
+- Twilio deployment requires a stable public HTTPS/WSS origin and does not
+  currently expose call-status callbacks, recording, or DTMF application logic.
 - There is no order/backend integration or tool-calling workflow.
 
 ## Future integration points

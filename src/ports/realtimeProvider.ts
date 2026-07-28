@@ -1,8 +1,20 @@
 import type { Buffer } from "node:buffer";
 
+export type RealtimeAudioFormat =
+  | {
+      readonly encoding: "pcm16";
+      readonly sampleRate: 24_000;
+    }
+  | {
+      readonly encoding: "g711_ulaw";
+      readonly sampleRate: 8_000;
+    };
+
 export interface RealtimeSessionOptions {
   readonly sessionId: string;
   readonly instructions?: string;
+  readonly audioFormat?: RealtimeAudioFormat;
+  readonly turnDetection?: "manual" | "server_vad";
 }
 
 export type RealtimeProviderEvent =
