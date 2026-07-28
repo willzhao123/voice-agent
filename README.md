@@ -1,14 +1,107 @@
 # voice-agent
 
 A provider-agnostic voice session service built with Node.js 22+, TypeScript,
-Fastify, and WebSockets.
+Fastify, and WebSockets. It includes a minimal browser harness for exercising
+audio and text turns during development.
 
-## Prerequisites
+## Architecture overview
+
+The service uses ports and adapters:
+
+```text
+Browser
+  │  JSON control events + binary PCM audio
+  ▼
+Fastify WebSocket adapter
+  ▼
+VoiceSessionManager
+  ├── SessionStore port ──► in-memory adapter
+  └── RealtimeProvider port
+                         ├── mock adapter
+                         └── OpenAI Realtime adapter ──► OpenAI
+```
+
+The domain and application layers do not import OpenAI types, WebSocket types,
+or Fastify types. They communicate with realtime implementations through the
+generic `RealtimeProvider` and `RealtimeSession` interfaces. Provider event
+payloads are normalized before they reach the application.
+
+Each browser connection owns one voice session. Incoming frames for that
+session are processed sequentially, and sessions have independent provider
+connections, listeners, state, and buffered audio. The session manager can
+close all active provider connections during application shutdown.
+
+There is no order, cart, payment, inventory, or other business-backend
+integration in this repository.
+
+## Directory structure
+
+```text
+public/
+  index.html                         # Minimal browser test UI
+  app.js                             # WebSocket, microphone, and audio playback
+src/
+  adapters/
+    realtime/
+      mockRealtimeProvider.ts        # Credential-free deterministic test provider
+      openaiRealtimeProvider.ts      # OpenAI Realtime protocol adapter
+    storage/
+      memorySessionStore.ts          # Process-local session persistence
+    websocket/
+      voiceWebsocketRoute.ts         # Validated public WebSocket protocol
+  application/
+    voiceSessionManager.ts           # Session orchestration and isolation
+  config/
+    env.ts                           # Environment parsing and validation
+  domain/
+    voiceEvents.ts                   # Client message schema and domain events
+    voiceSession.ts                  # Voice session model
+  ports/
+    realtimeProvider.ts              # Provider-neutral realtime contract
+    sessionStore.ts                  # Storage contract
+  shared/
+    errors.ts
+    logger.ts
+  app.ts                             # Fastify composition root
+  gracefulShutdown.ts                # Idempotent SIGINT/SIGTERM shutdown
+  server.ts                          # Process entry point
+test/                                # Unit, protocol, and lifecycle tests
+```
+
+## Environment variables
+
+Copy `.env.example` to `.env`. The local `.env` file is ignored by Git.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `HOST` | `0.0.0.0` | HTTP listen address |
+| `PORT` | `3000` | HTTP listen port |
+| `LOG_LEVEL` | `info` | Pino log level |
+| `REALTIME_PROVIDER` | `mock` | `mock` or `openai` |
+| `OPENAI_API_KEY` | unset | Server-only OpenAI credential; required for `openai` |
+| `OPENAI_REALTIME_MODEL` | `gpt-realtime-2.1` | OpenAI Realtime model name |
+| `VOICE_INSTRUCTIONS` | `You are a helpful voice assistant.` | Base instructions applied to every session |
+| `MAX_JSON_MESSAGE_BYTES` | `65536` | Maximum incoming JSON frame size |
+| `MAX_AUDIO_FRAME_BYTES` | `262144` | Maximum incoming binary audio-frame size |
+| `IDLE_SESSION_TIMEOUT_MS` | `60000` | Close a connection with no client frames |
+| `MAX_SESSION_DURATION_MS` | `1800000` | Absolute connection lifetime |
+| `WEBSOCKET_HEARTBEAT_INTERVAL_MS` | `30000` | Server ping interval |
+| `WEBSOCKET_MAX_PENDING_MESSAGES` | `32` | Maximum queued incoming frames per connection |
+| `WEBSOCKET_MAX_BUFFERED_BYTES` | `1048576` | Maximum buffered outgoing WebSocket data |
+
+Environment values are validated at startup. The API key is used only by the
+server-side OpenAI adapter and is never included in browser assets or public
+protocol messages. Default logs redact common API-key and authorization fields;
+raw audio and full provider payloads are not logged.
+
+## Local startup
+
+Requirements:
 
 - Node.js 22 or newer
 - npm
 
-## Setup
+Install and run:
 
 ```sh
 cp .env.example .env
@@ -16,57 +109,47 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000` to use the small browser client. The HTTP health
-check is available at `GET /health`, and voice sessions connect at
-`GET /v1/voice` using a WebSocket upgrade.
+The default configuration uses the mock provider and needs no API key. The
+service is available at `http://localhost:3000`.
 
-The default `mock` realtime provider echoes audio events and completes responses
-without external credentials. With `REALTIME_PROVIDER=openai`, the backend
-opens an authenticated server-to-server Realtime WebSocket; the API key is
-never sent to the browser.
+Useful endpoints:
 
-`GET /ready` returns `200` when the configured provider initializes and `503`
-otherwise.
+- `GET /health` returns process health.
+- `GET /ready` verifies that the configured provider can initialize.
+- `GET /v1/voice` upgrades to the voice WebSocket protocol.
+- `GET /` serves the browser test client.
 
-## Configuration
+For a non-watching process, use `npm start`. To compile TypeScript into `dist/`,
+use `npm run build`.
 
-Copy `.env.example` to `.env`. Supported settings are `HOST`, `PORT`,
-`LOG_LEVEL`, `REALTIME_PROVIDER`, `OPENAI_API_KEY`,
-`OPENAI_REALTIME_MODEL`, `VOICE_INSTRUCTIONS`, `MAX_JSON_MESSAGE_BYTES`,
-`MAX_AUDIO_FRAME_BYTES`, `IDLE_SESSION_TIMEOUT_MS`,
-`MAX_SESSION_DURATION_MS`, `WEBSOCKET_HEARTBEAT_INTERVAL_MS`,
-`WEBSOCKET_MAX_PENDING_MESSAGES`, and `WEBSOCKET_MAX_BUFFERED_BYTES`.
-`OPENAI_API_KEY` is required only when `REALTIME_PROVIDER=openai`;
-configuration errors stop startup without printing secret values.
+## Browser test instructions
 
-The WebSocket limits bound individual frames, queued inbound work, and buffered
-outbound data. Idle and maximum-duration timers close sessions and their
-provider connections. The server also probes clients with WebSocket ping frames
-and terminates connections that do not pong. `SIGINT` and `SIGTERM` stop
-Fastify gracefully and close all active realtime sessions.
+1. Start the service with `REALTIME_PROVIDER=mock`.
+2. Open `http://localhost:3000`.
+3. Select **Connect** and wait for the status to become **Connected**.
+4. Use the text field to test a turn without microphone input.
+5. Select **Start microphone**, speak, then select **Stop microphone**. Stopping
+   sends `input_audio.commit`, which creates the response turn.
+6. Select **Interrupt assistant** to cancel a response and stop queued local
+   playback.
+7. Select **Disconnect** when finished.
 
-Logs are structured and session lifecycle records include `sessionId`. Audio
-bytes and full provider events are not logged. Common API-key and authorization
-fields are redacted from the default logger.
+The browser stops microphone tracks when the WebSocket disconnects. Microphone
+access generally requires localhost or HTTPS and explicit browser permission.
 
-## Architecture
+With the mock provider, microphone audio is echoed to verify binary streaming
+and playback. Mock text responses are deterministic test payloads, not
+synthesized speech.
+
+## WebSocket protocol
+
+Connect using a WebSocket upgrade:
 
 ```text
-src/
-  domain/       # Voice session entities and events
-  ports/        # Provider and persistence contracts
-  application/  # Provider-agnostic session orchestration
-  adapters/     # Fastify/WebSocket, storage, and realtime implementations
-  config/       # Environment validation
-  shared/       # Errors and logging
+GET /v1/voice
 ```
 
-Dependencies point inward: the application and domain layers do not depend on
-Fastify, WebSocket, or a realtime-model SDK.
-
-## WebSocket events
-
-Client events:
+The first application message must start the session:
 
 ```json
 {
@@ -74,34 +157,138 @@ Client events:
   "requestId": "client-generated-id",
   "instructions": "You are a helpful voice assistant."
 }
+```
+
+The server confirms creation:
+
+```json
+{
+  "type": "session.created",
+  "requestId": "client-generated-id",
+  "sessionId": "server-generated-id"
+}
+```
+
+Client JSON messages:
+
+```json
 { "type": "input.text", "text": "Development test message" }
 { "type": "input_audio.commit" }
 { "type": "response.interrupt" }
 { "type": "session.end" }
 ```
 
-Caller audio and assistant audio use binary WebSocket frames. The OpenAI
-provider and browser client assume raw signed 16-bit little-endian mono PCM at
-24 kHz in both directions, with no WAV or other container header. The browser
-captures at the device's native Web Audio sample rate, linearly resamples each
-chunk to 24 kHz, and sends it as PCM16. Assistant binary frames are decoded
-using the same PCM16/24 kHz assumption and scheduled for gapless playback.
-JSON server messages are
-`session.created`, `transcript.user.final`,
-`transcript.agent.delta`, `transcript.agent.final`,
-`output_audio.completed`, `response.started`, `response.completed`,
-`response.interrupted`, and `error`.
+Client schemas are strict and validated with Zod. Unknown fields, missing
+fields, malformed JSON, out-of-order commands, and oversized frames produce
+structured `error` events. Binary frames are treated as caller audio and are
+accepted only after `session.start`.
+
+Server JSON events:
+
+- `session.created`
+- `transcript.user.final`
+- `response.started`
+- `transcript.agent.delta`
+- `transcript.agent.final`
+- `output_audio.completed`
+- `response.completed`
+- `response.interrupted`
+- `error`
+
+Assistant audio is sent as binary frames. A server `error` contains `code`,
+`message`, and `recoverable`. Unrecoverable provider errors close the browser
+connection and clean up its provider session.
+
+### Audio format
+
+Audio in both directions is assumed to be raw signed 16-bit little-endian mono
+PCM at 24 kHz, without a WAV or other container header.
+
+The browser captures at the device's Web Audio sample rate, linearly resamples
+each chunk to 24 kHz, converts it to PCM16, and sends binary WebSocket frames.
+Assistant binary frames are decoded using the same PCM16/24 kHz assumption and
+scheduled for playback.
+
+## Selecting a realtime provider
+
+### Mock provider
+
+The mock provider is the default:
+
+```sh
+REALTIME_PROVIDER=mock npm run dev
+```
+
+It requires no external service or credentials. It emits normalized transcript,
+response, interruption, and audio events, making it suitable for local protocol
+and lifecycle testing.
+
+### OpenAI Realtime provider
+
+Set the provider, server-only API key, and optionally the model:
+
+```sh
+REALTIME_PROVIDER=openai \
+OPENAI_API_KEY=your-server-only-key \
+OPENAI_REALTIME_MODEL=gpt-realtime-2.1 \
+npm run dev
+```
+
+The backend opens the authenticated provider WebSocket. The browser connects
+only to this service and never receives the provider URL headers, API key, or
+provider-specific event payloads.
+
+## Production-safety behavior
+
+- Incoming JSON and audio frames have independent size limits.
+- Incoming work is sequential per session and has a bounded queue.
+- Outgoing data is stopped when the WebSocket buffered-byte limit is reached.
+- Idle and maximum-duration timers close sessions.
+- Server ping/pong heartbeats terminate unresponsive connections.
+- Client disconnects and fatal provider disconnects close session resources.
+- `SIGINT` and `SIGTERM` close Fastify and all active realtime connections.
+- Session lifecycle and failures use structured logs with `sessionId` where one
+  has been allocated.
+
+## Known limitations
+
+- Session state is process-local and is lost on restart.
+- There is no authentication, authorization, tenant isolation, or distributed
+  rate limiting.
+- The service is single-process; active sessions cannot migrate between
+  instances.
+- Audio content is assumed to be PCM16/24 kHz after frame-size validation; the
+  server does not inspect or transcode its encoding.
+- Browser capture uses the deprecated `ScriptProcessorNode` and performs simple
+  per-chunk linear resampling rather than production-grade audio processing.
+- Turn detection is manual: stopping the microphone commits the audio buffer.
+- The mock provider verifies protocol flow and audio echoing but does not
+  synthesize natural speech.
+- The OpenAI adapter targets its configured Realtime protocol and fixed 24 kHz
+  PCM format; provider API changes may require adapter updates.
+- There is no order/backend integration or tool-calling workflow.
+
+## Future integration points
+
+- Implement `SessionStore` with a durable shared store.
+- Add other realtime vendors behind `RealtimeProvider`.
+- Add authentication and tenant-aware policy in Fastify hooks.
+- Add metrics, tracing, and provider latency/error telemetry without recording
+  audio or full provider payloads.
+- Replace browser audio processing with an `AudioWorklet`.
+- Add server-side audio validation/transcoding and automatic voice activity
+  detection.
+- Introduce business tools—such as a future ordering backend—through a separate
+  application port and adapter. No such integration exists today.
 
 ## Commands
 
 ```sh
 npm run dev
 npm start
-npm run build
 npm run typecheck
+npm run lint
 npm test
 npm run test:watch
-npm run lint
+npm run build
 ```
-
-No ordering-backend integration is included.
