@@ -21,12 +21,12 @@ check is available at `GET /health`, and voice sessions connect at
 `GET /v1/voice` using a WebSocket upgrade.
 
 The default `mock` realtime provider echoes audio events and completes responses
-without external credentials. The OpenAI realtime adapter is an explicit
-placeholder; it does not import or call an SDK yet.
+without external credentials. With `REALTIME_PROVIDER=openai`, the backend
+opens an authenticated server-to-server Realtime WebSocket; the API key is
+never sent to the browser.
 
 `GET /ready` returns `200` when the configured provider initializes and `503`
-otherwise. The OpenAI placeholder reports not-ready until its adapter is
-implemented.
+otherwise.
 
 ## Configuration
 
@@ -67,8 +67,11 @@ Client events:
 { "type": "session.end" }
 ```
 
-Caller audio and assistant audio use binary WebSocket frames. JSON server
-messages are `session.created`, `transcript.user.final`,
+Caller audio and assistant audio use binary WebSocket frames. The OpenAI
+provider expects signed 16-bit mono PCM at 24 kHz; its assistant audio uses the
+same format. The included browser recorder is intended for the default mock
+provider until browser-side PCM capture is added. JSON server messages are
+`session.created`, `transcript.user.final`,
 `transcript.agent.delta`, `transcript.agent.final`,
 `output_audio.completed`, `response.started`, `response.completed`,
 `response.interrupted`, and `error`.
