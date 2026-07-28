@@ -4,7 +4,10 @@ const commitButton = document.querySelector("#commit");
 const logElement = document.querySelector("#log");
 
 const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-const socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
+const socket = new WebSocket(
+  `${protocol}//${window.location.host}/v1/voice`,
+);
+socket.binaryType = "arraybuffer";
 
 let mediaRecorder;
 
@@ -19,27 +22,26 @@ function send(event) {
   }
 }
 
-function toBase64(blob) {
-  return blob.arrayBuffer().then((buffer) => {
-    const bytes = new Uint8Array(buffer);
-    let binary = "";
-
-    for (const byte of bytes) {
-      binary += String.fromCharCode(byte);
-    }
-
-    return window.btoa(binary);
-  });
-}
-
 socket.addEventListener("open", () => {
   statusElement.textContent = "Connected";
+  send({
+    type: "session.start",
+    requestId: crypto.randomUUID(),
+    instructions: "You are a helpful voice assistant.",
+  });
   recordButton.disabled = false;
   commitButton.disabled = false;
 });
 
 socket.addEventListener("message", (message) => {
-  log(JSON.parse(message.data));
+  if (typeof message.data === "string") {
+    log(JSON.parse(message.data));
+  } else {
+    log({
+      type: "output_audio.binary",
+      bytes: message.data.byteLength,
+    });
+  }
 });
 
 socket.addEventListener("close", () => {
@@ -59,10 +61,7 @@ recordButton.addEventListener("click", async () => {
   mediaRecorder = new MediaRecorder(stream);
   mediaRecorder.addEventListener("dataavailable", async (event) => {
     if (event.data.size > 0) {
-      send({
-        type: "audio.append",
-        audio: await toBase64(event.data),
-      });
+      socket.send(await event.data.arrayBuffer());
     }
   });
   mediaRecorder.addEventListener("stop", () => {
@@ -75,7 +74,7 @@ recordButton.addEventListener("click", async () => {
 });
 
 commitButton.addEventListener("click", () => {
-  send({ type: "audio.commit" });
+  send({ type: "input_audio.commit" });
 });
 
 window.addEventListener("beforeunload", () => {

@@ -17,7 +17,8 @@ npm run dev
 ```
 
 Open `http://localhost:3000` to use the small browser client. The HTTP health
-check is available at `GET /health`, and voice sessions connect at `WS /ws`.
+check is available at `GET /health`, and voice sessions connect at
+`GET /v1/voice` using a WebSocket upgrade.
 
 The default `mock` realtime provider echoes audio events and completes responses
 without external credentials. The OpenAI realtime adapter is an explicit
@@ -43,20 +44,22 @@ Fastify, WebSocket, or a realtime-model SDK.
 Client events:
 
 ```json
-{ "type": "audio.append", "audio": "<base64>" }
-{ "type": "audio.commit" }
-{ "type": "text.send", "text": "Development test message" }
+{
+  "type": "session.start",
+  "requestId": "client-generated-id",
+  "instructions": "You are a helpful voice assistant."
+}
+{ "type": "input.text", "text": "Development test message" }
+{ "type": "input_audio.commit" }
 { "type": "response.interrupt" }
 { "type": "session.end" }
-{ "type": "ping" }
 ```
 
-Provider events are normalized as `session.ready`, `input_audio.started`,
-`input_audio.stopped`, `transcript.user.final`, `transcript.agent.delta`,
-`transcript.agent.final`, `output_audio.delta`, `output_audio.completed`,
-`response.started`, `response.completed`, `response.interrupted`, and `error`.
-Internal audio payloads are `Buffer` values; the WebSocket adapter encodes audio
-as base64 for transport.
+Caller audio and assistant audio use binary WebSocket frames. JSON server
+messages are `session.created`, `transcript.user.final`,
+`transcript.agent.delta`, `transcript.agent.final`,
+`output_audio.completed`, `response.started`, `response.completed`,
+`response.interrupted`, and `error`.
 
 ## Commands
 

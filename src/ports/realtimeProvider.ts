@@ -2,6 +2,7 @@ import type { Buffer } from "node:buffer";
 
 export interface RealtimeSessionOptions {
   readonly sessionId: string;
+  readonly instructions?: string;
 }
 
 export type RealtimeProviderEvent =

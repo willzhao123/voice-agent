@@ -40,6 +40,7 @@ export class VoiceSessionManager {
 
   async createSession(
     initialListener?: VoiceSessionEventListener,
+    instructions?: string,
   ): Promise<VoiceSession> {
     const session = createVoiceSession(await this.createUniqueId());
     const listeners = new Set<VoiceSessionEventListener>();
@@ -51,7 +52,10 @@ export class VoiceSessionManager {
 
     try {
       const realtimeSession = await this.realtimeProvider.openSession(
-        { sessionId: session.id },
+        {
+          sessionId: session.id,
+          ...(instructions === undefined ? {} : { instructions }),
+        },
         (event) => this.emit(session.id, event, listeners),
       );
 
