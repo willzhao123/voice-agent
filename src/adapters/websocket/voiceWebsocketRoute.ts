@@ -26,8 +26,9 @@ export function registerVoiceWebsocketRoute(
       }
     };
 
-    const handlePromise = sessionManager
-      .startSession(send)
+    const sessionIdPromise = sessionManager
+      .createSession(send)
+      .then((session) => session.id)
       .catch((error: unknown) => {
         send({
           type: "error",
@@ -44,8 +45,28 @@ export function registerVoiceWebsocketRoute(
         try {
           const rawEvent: unknown = JSON.parse(data.toString());
           const event = parseClientVoiceEvent(rawEvent);
-          const handle = await handlePromise;
-          await handle.receive(event);
+          const sessionId = await sessionIdPromise;
+
+          switch (event.type) {
+            case "audio.append":
+              await sessionManager.sendAudio(sessionId, event.audio);
+              break;
+            case "audio.commit":
+              await sessionManager.commitAudio(sessionId);
+              break;
+            case "text.send":
+              await sessionManager.sendText(sessionId, event.text);
+              break;
+            case "response.interrupt":
+              await sessionManager.interrupt(sessionId);
+              break;
+            case "session.end":
+              await sessionManager.closeSession(sessionId);
+              break;
+            case "ping":
+              send({ type: "pong" });
+              break;
+          }
         } catch (error) {
           send({
             type: "error",
@@ -58,8 +79,10 @@ export function registerVoiceWebsocketRoute(
     });
 
     socket.on("close", () => {
-      void handlePromise
-        .then(async (handle) => handle.close())
+      void sessionIdPromise
+        .then(async (sessionId) => {
+          await sessionManager.closeSession(sessionId);
+        })
         .catch((error: unknown) => {
           app.log.error(error, "Failed to close voice session");
         });

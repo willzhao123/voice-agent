@@ -14,6 +14,14 @@ export class SessionClosedError extends Error {
   }
 }
 
+export class SessionNotFoundError extends Error {
+  override readonly name = "SessionNotFoundError";
+
+  constructor(sessionId: string) {
+    super(`Voice session ${sessionId} was not found`);
+  }
+}
+
 export function serializeError(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown error";
 }
