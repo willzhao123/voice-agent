@@ -1,9 +1,7 @@
 import type {
-  RealtimeConnection,
-  RealtimeEventListener,
   RealtimeProvider,
+  RealtimeSession,
 } from "../../ports/realtimeProvider.js";
-import type { VoiceSession } from "../../domain/voiceSession.js";
 import {
   ConfigurationError,
   ExternalProviderUnavailableError,
@@ -12,10 +10,7 @@ import {
 export class OpenAIRealtimeProvider implements RealtimeProvider {
   constructor(private readonly apiKey?: string) {}
 
-  async connect(
-    _session: VoiceSession,
-    _onEvent: RealtimeEventListener,
-  ): Promise<RealtimeConnection> {
+  async openSession(): Promise<RealtimeSession> {
     if (this.apiKey === undefined) {
       throw new ConfigurationError(
         "OPENAI_API_KEY is required when REALTIME_PROVIDER=openai",

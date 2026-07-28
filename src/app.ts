@@ -1,8 +1,5 @@
 import websocket from "@fastify/websocket";
-import Fastify, {
-  type FastifyBaseLogger,
-  type FastifyInstance,
-} from "fastify";
+import Fastify, { type FastifyInstance } from "fastify";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
@@ -14,10 +11,7 @@ import { registerVoiceWebsocketRoute } from "./adapters/websocket/voiceWebsocket
 import { env } from "./config/env.js";
 import type { RealtimeProvider } from "./ports/realtimeProvider.js";
 import type { SessionStore } from "./ports/sessionStore.js";
-import {
-  createLogger,
-  type Logger,
-} from "./shared/logger.js";
+import type { Logger } from "./shared/logger.js";
 
 export interface AppDependencies {
   logger?: Logger;
@@ -36,10 +30,13 @@ function createRealtimeProvider(): RealtimeProvider {
 export async function buildApp(
   dependencies: AppDependencies = {},
 ): Promise<FastifyInstance> {
-  const logger = dependencies.logger ?? createLogger(env.LOG_LEVEL);
   const app = Fastify({
-    loggerInstance: logger as FastifyBaseLogger,
+    logger:
+      dependencies.logger === undefined
+        ? { level: env.LOG_LEVEL }
+        : false,
   });
+  const logger = dependencies.logger ?? app.log;
   const provider = dependencies.realtimeProvider ?? createRealtimeProvider();
   const sessionStore = dependencies.sessionStore ?? new MemorySessionStore();
   const sessionManager = new VoiceSessionManager(

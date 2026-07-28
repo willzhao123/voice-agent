@@ -1,7 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import { WebSocket } from "ws";
 
-import type { VoiceSessionManager } from "../../application/voiceSessionManager.js";
+import type {
+  VoiceSessionEvent,
+  VoiceSessionManager,
+} from "../../application/voiceSessionManager.js";
 import { parseClientVoiceEvent } from "../../domain/voiceEvents.js";
 import { serializeError } from "../../shared/errors.js";
 
@@ -10,16 +13,28 @@ export function registerVoiceWebsocketRoute(
   sessionManager: VoiceSessionManager,
 ): void {
   app.get("/ws", { websocket: true }, (socket) => {
-    const send = (event: unknown): void => {
+    const send = (event: VoiceSessionEvent): void => {
       if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify(event));
+        const wireEvent =
+          event.type === "output_audio.delta"
+            ? {
+                ...event,
+                audio: event.audio.toString("base64"),
+              }
+            : event;
+        socket.send(JSON.stringify(wireEvent));
       }
     };
 
     const handlePromise = sessionManager
       .startSession(send)
       .catch((error: unknown) => {
-        send({ type: "error", message: serializeError(error) });
+        send({
+          type: "error",
+          message: serializeError(error),
+          code: "session_start_failed",
+          recoverable: false,
+        });
         socket.close(1011, "Unable to start voice session");
         throw error;
       });
@@ -32,7 +47,12 @@ export function registerVoiceWebsocketRoute(
           const handle = await handlePromise;
           await handle.receive(event);
         } catch (error) {
-          send({ type: "error", message: serializeError(error) });
+          send({
+            type: "error",
+            message: serializeError(error),
+            code: "invalid_client_event",
+            recoverable: true,
+          });
         }
       })();
     });

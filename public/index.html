@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Voice Agent</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: system-ui, sans-serif;
+        background: #10131a;
+        color: #f4f6fb;
+      }
+
+      body {
+        max-width: 42rem;
+        margin: 4rem auto;
+        padding: 0 1.25rem;
+      }
+
+      button {
+        padding: 0.7rem 1rem;
+        margin-right: 0.5rem;
+        border: 0;
+        border-radius: 0.5rem;
+        cursor: pointer;
+      }
+
+      #record {
+        background: #6d5dfc;
+        color: white;
+      }
+
+      #log {
+        min-height: 12rem;
+        padding: 1rem;
+        overflow: auto;
+        border-radius: 0.5rem;
+        background: #191e29;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Voice Agent</h1>
+    <p id="status">Connecting…</p>
+    <p>
+      <button id="record" disabled>Start microphone</button>
+      <button id="commit" disabled>Commit audio</button>
+    </p>
+    <pre id="log" aria-live="polite"></pre>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

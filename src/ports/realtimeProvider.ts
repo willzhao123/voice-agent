@@ -1,21 +1,58 @@
-import type {
-  RealtimeEvent,
-} from "../domain/voiceEvents.js";
-import type {
-  VoiceSession,
-} from "../domain/voiceSession.js";
+import type { Buffer } from "node:buffer";
 
-export type RealtimeEventListener = (event: RealtimeEvent) => void;
+export interface RealtimeSessionOptions {
+  readonly sessionId: string;
+}
 
-export interface RealtimeConnection {
-  appendAudio(audio: string): Promise<void>;
-  commitAudio(): Promise<void>;
+export type RealtimeProviderEvent =
+  | {
+      type: "session.ready";
+      sessionId: string;
+    }
+  | { type: "input_audio.started" }
+  | { type: "input_audio.stopped" }
+  | {
+      type: "transcript.user.final";
+      transcript: string;
+    }
+  | {
+      type: "transcript.agent.delta";
+      transcript: string;
+    }
+  | {
+      type: "transcript.agent.final";
+      transcript: string;
+    }
+  | {
+      type: "output_audio.delta";
+      audio: Buffer;
+    }
+  | { type: "output_audio.completed" }
+  | { type: "response.started" }
+  | { type: "response.completed" }
+  | { type: "response.interrupted" }
+  | {
+      type: "error";
+      message: string;
+      code: string;
+      recoverable: boolean;
+    };
+
+export type RealtimeEventListener = (
+  event: RealtimeProviderEvent,
+) => void;
+
+export interface RealtimeSession {
+  sendInputAudio(audio: Buffer): Promise<void>;
+  commitInputAudio(): Promise<void>;
+  sendText(text: string): Promise<void>;
+  interrupt(): Promise<void>;
   close(): Promise<void>;
 }
 
 export interface RealtimeProvider {
-  connect(
-    session: VoiceSession,
+  openSession(
+    options: RealtimeSessionOptions,
     onEvent: RealtimeEventListener,
-  ): Promise<RealtimeConnection>;
+  ): Promise<RealtimeSession>;
 }

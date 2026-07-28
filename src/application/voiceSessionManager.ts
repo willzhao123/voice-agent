@@ -10,14 +10,17 @@ import {
   type VoiceSession,
 } from "../domain/voiceSession.js";
 import type {
-  RealtimeConnection,
+  RealtimeProviderEvent,
   RealtimeProvider,
+  RealtimeSession,
 } from "../ports/realtimeProvider.js";
 import type { SessionStore } from "../ports/sessionStore.js";
 import { SessionClosedError } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
 
 export type ServerEventListener = (event: ServerVoiceEvent) => void;
+export type VoiceSessionEvent = ServerVoiceEvent | RealtimeProviderEvent;
+export type VoiceSessionEventListener = (event: VoiceSessionEvent) => void;
 
 export interface VoiceSessionHandle {
   readonly session: VoiceSession;
@@ -34,14 +37,17 @@ export class VoiceSessionManager {
   ) {}
 
   async startSession(
-    onEvent: ServerEventListener,
+    onEvent: VoiceSessionEventListener,
   ): Promise<VoiceSessionHandle> {
     let session = createVoiceSession(this.createId());
     await this.sessionStore.save(session);
 
-    let connection: RealtimeConnection;
+    let realtimeSession: RealtimeSession;
     try {
-      connection = await this.realtimeProvider.connect(session, onEvent);
+      realtimeSession = await this.realtimeProvider.openSession(
+        { sessionId: session.id },
+        onEvent,
+      );
     } catch (error) {
       await this.sessionStore.delete(session.id);
       throw error;
@@ -55,7 +61,7 @@ export class VoiceSessionManager {
       }
 
       isClosed = true;
-      await connection.close();
+      await realtimeSession.close();
       session = closeVoiceSession(session);
       await this.sessionStore.save(session);
       onEvent({
@@ -72,10 +78,16 @@ export class VoiceSessionManager {
 
       switch (event.type) {
         case "audio.append":
-          await connection.appendAudio(event.audio);
+          await realtimeSession.sendInputAudio(event.audio);
           break;
         case "audio.commit":
-          await connection.commitAudio();
+          await realtimeSession.commitInputAudio();
+          break;
+        case "text.send":
+          await realtimeSession.sendText(event.text);
+          break;
+        case "response.interrupt":
+          await realtimeSession.interrupt();
           break;
         case "session.end":
           await close();
