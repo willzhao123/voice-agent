@@ -5,7 +5,13 @@ import type { WebSocket } from "ws";
 
 import { MockRealtimeProvider } from "../src/adapters/realtime/mockRealtimeProvider.js";
 import { MemorySessionStore } from "../src/adapters/storage/memorySessionStore.js";
+import type { VoiceWebsocketOptions } from "../src/adapters/websocket/voiceWebsocketRoute.js";
 import { buildApp } from "../src/app.js";
+import type {
+  RealtimeProvider,
+  RealtimeProviderEvent,
+  RealtimeSession,
+} from "../src/ports/realtimeProvider.js";
 import { createLogger } from "../src/shared/logger.js";
 
 interface WireMessage {
@@ -21,10 +27,18 @@ afterEach(async () => {
 });
 
 async function createTestSocket() {
+  return createSocketHarness(new MockRealtimeProvider());
+}
+
+async function createSocketHarness(
+  realtimeProvider: RealtimeProvider,
+  voiceWebsocketOptions: Partial<VoiceWebsocketOptions> = {},
+) {
   const app = await buildApp({
     logger: silentLogger,
-    realtimeProvider: new MockRealtimeProvider(),
+    realtimeProvider,
     sessionStore: new MemorySessionStore(),
+    voiceWebsocketOptions,
   });
   apps.push(app);
   await app.ready();
@@ -35,6 +49,45 @@ async function createTestSocket() {
   });
 
   return { collector, socket };
+}
+
+class TrackingRealtimeProvider implements RealtimeProvider {
+  closeCalls = 0;
+  private listener:
+    | ((event: RealtimeProviderEvent) => void)
+    | undefined;
+
+  async initialize(): Promise<void> {}
+
+  async openSession(
+    options: { sessionId: string },
+    onEvent: (event: RealtimeProviderEvent) => void,
+  ): Promise<RealtimeSession> {
+    this.listener = onEvent;
+    onEvent({
+      type: "session.ready",
+      sessionId: options.sessionId,
+    });
+
+    return {
+      async sendInputAudio() {},
+      async commitInputAudio() {},
+      async sendText() {},
+      async interrupt() {},
+      close: async () => {
+        this.closeCalls += 1;
+      },
+    };
+  }
+
+  disconnect(): void {
+    this.listener?.({
+      type: "error",
+      code: "provider_connection_closed",
+      message: "Provider disconnected",
+      recoverable: false,
+    });
+  }
 }
 
 function createMessageCollector() {
@@ -92,6 +145,19 @@ async function closeSocket(socket: WebSocket): Promise<void> {
   const closePromise = once(socket, "close");
   socket.close();
   await closePromise;
+}
+
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 500,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error("Timed out waiting for condition");
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 describe("GET /v1/voice", () => {
@@ -196,5 +262,111 @@ describe("GET /v1/voice", () => {
     });
 
     await closeSocket(socket);
+  });
+
+  it("rejects oversized JSON and audio frames", async () => {
+    const jsonHarness = await createSocketHarness(
+      new MockRealtimeProvider(),
+      {
+        maxJsonMessageBytes: 32,
+        heartbeatIntervalMs: 10_000,
+      },
+    );
+    const jsonClose = once(jsonHarness.socket, "close");
+    jsonHarness.socket.send(JSON.stringify({
+      type: "input.text",
+      text: "This message is intentionally oversized",
+    }));
+
+    await expect(
+      jsonHarness.collector.nextJson("error"),
+    ).resolves.toMatchObject({
+      code: "message_too_large",
+      recoverable: false,
+    });
+    await jsonClose;
+
+    const audioHarness = await createSocketHarness(
+      new MockRealtimeProvider(),
+      {
+        maxAudioFrameBytes: 4,
+        heartbeatIntervalMs: 10_000,
+      },
+    );
+    const audioClose = once(audioHarness.socket, "close");
+    audioHarness.socket.send(Buffer.alloc(5), { binary: true });
+
+    await expect(
+      audioHarness.collector.nextJson("error"),
+    ).resolves.toMatchObject({
+      code: "audio_frame_too_large",
+      recoverable: false,
+    });
+    await audioClose;
+  });
+
+  it("closes and cleans up an idle session", async () => {
+    const provider = new TrackingRealtimeProvider();
+    const { collector, socket } = await createSocketHarness(
+      provider,
+      {
+        idleTimeoutMs: 30,
+        maxSessionDurationMs: 10_000,
+        heartbeatIntervalMs: 10_000,
+      },
+    );
+    socket.send(JSON.stringify({
+      type: "session.start",
+      requestId: "idle-session",
+      instructions: "Test idle cleanup.",
+    }));
+    await collector.nextJson("session.created");
+    const closePromise = once(socket, "close");
+
+    await expect(
+      collector.nextJson("error"),
+    ).resolves.toMatchObject({
+      code: "idle_timeout",
+      recoverable: false,
+    });
+    await closePromise;
+    await waitFor(() => provider.closeCalls === 1);
+  });
+
+  it("cleans up the provider session when the client disconnects", async () => {
+    const provider = new TrackingRealtimeProvider();
+    const { collector, socket } = await createSocketHarness(provider);
+    socket.send(JSON.stringify({
+      type: "session.start",
+      requestId: "client-disconnect",
+      instructions: "Test client cleanup.",
+    }));
+    await collector.nextJson("session.created");
+
+    socket.terminate();
+    await waitFor(() => provider.closeCalls === 1);
+  });
+
+  it("cleans up the session when the provider disconnects", async () => {
+    const provider = new TrackingRealtimeProvider();
+    const { collector, socket } = await createSocketHarness(provider);
+    socket.send(JSON.stringify({
+      type: "session.start",
+      requestId: "provider-disconnect",
+      instructions: "Test provider cleanup.",
+    }));
+    await collector.nextJson("session.created");
+    const closePromise = once(socket, "close");
+
+    provider.disconnect();
+
+    await expect(
+      collector.nextJson("error"),
+    ).resolves.toMatchObject({
+      code: "provider_connection_closed",
+      recoverable: false,
+    });
+    await closePromise;
+    await waitFor(() => provider.closeCalls === 1);
   });
 });

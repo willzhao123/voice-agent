@@ -32,9 +32,22 @@ otherwise.
 
 Copy `.env.example` to `.env`. Supported settings are `HOST`, `PORT`,
 `LOG_LEVEL`, `REALTIME_PROVIDER`, `OPENAI_API_KEY`,
-`OPENAI_REALTIME_MODEL`, and `VOICE_INSTRUCTIONS`. `OPENAI_API_KEY` is required
-only when `REALTIME_PROVIDER=openai`; configuration errors stop startup without
-printing secret values.
+`OPENAI_REALTIME_MODEL`, `VOICE_INSTRUCTIONS`, `MAX_JSON_MESSAGE_BYTES`,
+`MAX_AUDIO_FRAME_BYTES`, `IDLE_SESSION_TIMEOUT_MS`,
+`MAX_SESSION_DURATION_MS`, `WEBSOCKET_HEARTBEAT_INTERVAL_MS`,
+`WEBSOCKET_MAX_PENDING_MESSAGES`, and `WEBSOCKET_MAX_BUFFERED_BYTES`.
+`OPENAI_API_KEY` is required only when `REALTIME_PROVIDER=openai`;
+configuration errors stop startup without printing secret values.
+
+The WebSocket limits bound individual frames, queued inbound work, and buffered
+outbound data. Idle and maximum-duration timers close sessions and their
+provider connections. The server also probes clients with WebSocket ping frames
+and terminates connections that do not pong. `SIGINT` and `SIGTERM` stop
+Fastify gracefully and close all active realtime sessions.
+
+Logs are structured and session lifecycle records include `sessionId`. Audio
+bytes and full provider events are not logged. Common API-key and authorization
+fields are redacted from the default logger.
 
 ## Architecture
 

@@ -13,6 +13,16 @@ import {
 } from "../../domain/voiceEvents.js";
 import { serializeError } from "../../shared/errors.js";
 
+export interface VoiceWebsocketOptions {
+  maxJsonMessageBytes: number;
+  maxAudioFrameBytes: number;
+  idleTimeoutMs: number;
+  maxSessionDurationMs: number;
+  heartbeatIntervalMs: number;
+  maxPendingMessages: number;
+  maxBufferedBytes: number;
+}
+
 interface ServerError {
   type: "error";
   code: string;
@@ -25,15 +35,88 @@ export function registerVoiceWebsocketRoute(
   app: FastifyInstance,
   sessionManager: VoiceSessionManager,
   defaultInstructions: string,
+  options: VoiceWebsocketOptions,
 ): void {
   app.get("/v1/voice", { websocket: true }, (socket) => {
     let sessionId: string | undefined;
     let sessionEnded = false;
+    let closing = false;
     let processing = Promise.resolve();
+    let cleanupPromise: Promise<void> | undefined;
+    let pendingMessages = 0;
+    let isAlive = true;
+    let idleTimer: NodeJS.Timeout;
+
+    const clearConnectionTimers = (): void => {
+      clearTimeout(idleTimer);
+      clearTimeout(durationTimer);
+      clearInterval(heartbeatTimer);
+    };
+
+    const cleanupSession = async (): Promise<void> => {
+      if (cleanupPromise !== undefined) {
+        return cleanupPromise;
+      }
+
+      cleanupPromise = (async () => {
+        if (sessionId === undefined || sessionEnded) {
+          return;
+        }
+        sessionEnded = true;
+        try {
+          await sessionManager.closeSession(sessionId);
+        } catch (error) {
+          app.log.error(
+            { err: error, sessionId },
+            "Failed to clean up voice session",
+          );
+        }
+      })();
+      return cleanupPromise;
+    };
+
+    const requestClose = (
+      code: number,
+      reason: string,
+    ): void => {
+      if (closing) {
+        return;
+      }
+      closing = true;
+      clearConnectionTimers();
+      if (
+        socket.readyState === WebSocket.OPEN ||
+        socket.readyState === WebSocket.CONNECTING
+      ) {
+        socket.close(code, reason);
+      }
+      processing = processing.then(cleanupSession, cleanupSession);
+    };
+
+    const hasOutboundCapacity = (bytes: number): boolean => {
+      if (socket.bufferedAmount + bytes <= options.maxBufferedBytes) {
+        return true;
+      }
+
+      app.log.warn(
+        {
+          sessionId,
+          bufferedBytes: socket.bufferedAmount,
+          attemptedBytes: bytes,
+        },
+        "Closing voice WebSocket because outbound backpressure limit was reached",
+      );
+      requestClose(1013, "Backpressure limit reached");
+      return false;
+    };
 
     const sendJson = (message: object): void => {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify(message));
+      if (socket.readyState !== WebSocket.OPEN || closing) {
+        return;
+      }
+      const serialized = JSON.stringify(message);
+      if (hasOutboundCapacity(Buffer.byteLength(serialized))) {
+        socket.send(serialized);
       }
     };
 
@@ -53,6 +136,20 @@ export function registerVoiceWebsocketRoute(
       sendJson(error);
     };
 
+    const resetIdleTimer = (): void => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        sendError(
+          "idle_timeout",
+          "Voice session closed after being idle",
+          false,
+        );
+        app.log.info({ sessionId }, "Voice session idle timeout reached");
+        requestClose(1000, "Idle timeout");
+      }, options.idleTimeoutMs);
+      idleTimer.unref();
+    };
+
     const forwardProviderEvent = (event: VoiceSessionEvent): void => {
       switch (event.type) {
         case "transcript.user.final":
@@ -65,7 +162,11 @@ export function registerVoiceWebsocketRoute(
           sendJson(event);
           break;
         case "output_audio.delta":
-          if (socket.readyState === WebSocket.OPEN) {
+          if (
+            socket.readyState === WebSocket.OPEN &&
+            !closing &&
+            hasOutboundCapacity(event.audio.byteLength)
+          ) {
             socket.send(event.audio, { binary: true });
           }
           break;
@@ -75,6 +176,13 @@ export function registerVoiceWebsocketRoute(
             event.message,
             event.recoverable,
           );
+          if (!event.recoverable) {
+            app.log.warn(
+              { sessionId, providerErrorCode: event.code },
+              "Realtime provider connection became unavailable",
+            );
+            requestClose(1011, "Realtime provider disconnected");
+          }
           break;
         case "session.ready":
         case "input_audio.started":
@@ -183,39 +291,127 @@ export function registerVoiceWebsocketRoute(
       await handleJsonMessage(message);
     };
 
-    socket.on("message", (data, isBinary) => {
-      processing = processing
-        .then(async () => handleFrame(data, isBinary))
-        .catch((error: unknown) => {
-          if (error instanceof ProtocolStateError) {
-            sendError(error.code, error.message, true);
-            return;
-          }
-          if (error instanceof InvalidMessageError) {
-            sendError("invalid_message", error.message, true);
-            return;
-          }
+    const handleProcessingError = (error: unknown): void => {
+      if (error instanceof ProtocolStateError) {
+        sendError(error.code, error.message, true);
+        return;
+      }
+      if (error instanceof InvalidMessageError) {
+        sendError("invalid_message", error.message, true);
+        return;
+      }
 
-          sendError(
-            "internal_error",
-            serializeError(error),
-            false,
-          );
-          app.log.error(error, "Voice WebSocket message failed");
+      sendError(
+        "internal_error",
+        serializeError(error),
+        false,
+      );
+      app.log.error(
+        { err: error, sessionId },
+        "Voice WebSocket message failed",
+      );
+      requestClose(1011, "Message processing failed");
+    };
+
+    resetIdleTimer();
+    const durationTimer = setTimeout(() => {
+      sendError(
+        "session_duration_exceeded",
+        "Maximum voice session duration reached",
+        false,
+      );
+      app.log.info(
+        { sessionId },
+        "Maximum voice session duration reached",
+      );
+      requestClose(1000, "Maximum session duration");
+    }, options.maxSessionDurationMs);
+    durationTimer.unref();
+
+    const heartbeatTimer = setInterval(() => {
+      if (!isAlive) {
+        app.log.warn(
+          { sessionId },
+          "Terminating unresponsive voice WebSocket",
+        );
+        closing = true;
+        clearConnectionTimers();
+        socket.terminate();
+        processing = processing.then(cleanupSession, cleanupSession);
+        return;
+      }
+      isAlive = false;
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.ping();
+      }
+    }, options.heartbeatIntervalMs);
+    heartbeatTimer.unref();
+
+    socket.on("pong", () => {
+      isAlive = true;
+    });
+
+    socket.on("message", (data, isBinary) => {
+      if (closing) {
+        return;
+      }
+
+      const frameBytes = rawDataByteLength(data);
+      const maximumBytes = isBinary
+        ? options.maxAudioFrameBytes
+        : options.maxJsonMessageBytes;
+      if (frameBytes > maximumBytes) {
+        const errorCode = isBinary
+          ? "audio_frame_too_large"
+          : "message_too_large";
+        sendError(
+          errorCode,
+          `Frame exceeds the ${maximumBytes} byte limit`,
+          false,
+        );
+        app.log.warn(
+          {
+            sessionId,
+            frameType: isBinary ? "audio" : "json",
+            frameBytes,
+            maximumBytes,
+          },
+          "Rejected oversized voice WebSocket frame",
+        );
+        requestClose(1009, "Frame too large");
+        return;
+      }
+
+      if (pendingMessages >= options.maxPendingMessages) {
+        sendError(
+          "backpressure_limit",
+          "Too many pending WebSocket messages",
+          false,
+        );
+        app.log.warn(
+          { sessionId, pendingMessages },
+          "Closing voice WebSocket because incoming queue limit was reached",
+        );
+        requestClose(1013, "Backpressure limit reached");
+        return;
+      }
+
+      resetIdleTimer();
+      pendingMessages += 1;
+      processing = processing
+        .then(async () => {
+          await handleFrame(data, isBinary);
+        })
+        .catch(handleProcessingError)
+        .finally(() => {
+          pendingMessages -= 1;
         });
     });
 
     socket.on("close", () => {
-      void processing
-        .then(async () => {
-          if (sessionId !== undefined && !sessionEnded) {
-            await sessionManager.closeSession(sessionId);
-            sessionEnded = true;
-          }
-        })
-        .catch((error: unknown) => {
-          app.log.error(error, "Failed to clean up voice session");
-        });
+      closing = true;
+      clearConnectionTimers();
+      processing = processing.then(cleanupSession, cleanupSession);
     });
   });
 }
@@ -233,6 +429,13 @@ class ProtocolStateError extends Error {
   ) {
     super(message);
   }
+}
+
+function rawDataByteLength(data: RawData): number {
+  if (Array.isArray(data)) {
+    return data.reduce((total, chunk) => total + chunk.byteLength, 0);
+  }
+  return data.byteLength;
 }
 
 function rawDataToBuffer(data: RawData): Buffer {

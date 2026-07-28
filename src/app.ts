@@ -7,16 +7,23 @@ import { VoiceSessionManager } from "./application/voiceSessionManager.js";
 import { MockRealtimeProvider } from "./adapters/realtime/mockRealtimeProvider.js";
 import { OpenAIRealtimeProvider } from "./adapters/realtime/openaiRealtimeProvider.js";
 import { MemorySessionStore } from "./adapters/storage/memorySessionStore.js";
-import { registerVoiceWebsocketRoute } from "./adapters/websocket/voiceWebsocketRoute.js";
+import {
+  registerVoiceWebsocketRoute,
+  type VoiceWebsocketOptions,
+} from "./adapters/websocket/voiceWebsocketRoute.js";
 import { env } from "./config/env.js";
 import type { RealtimeProvider } from "./ports/realtimeProvider.js";
 import type { SessionStore } from "./ports/sessionStore.js";
-import type { Logger } from "./shared/logger.js";
+import {
+  createLoggerOptions,
+  type Logger,
+} from "./shared/logger.js";
 
 export interface AppDependencies {
   logger?: Logger;
   realtimeProvider?: RealtimeProvider;
   sessionStore?: SessionStore;
+  voiceWebsocketOptions?: Partial<VoiceWebsocketOptions>;
 }
 
 function createRealtimeProvider(): RealtimeProvider {
@@ -38,7 +45,7 @@ export async function buildApp(
   const app = Fastify({
     logger:
       dependencies.logger === undefined
-        ? { level: env.LOG_LEVEL }
+        ? createLoggerOptions(env.LOG_LEVEL)
         : false,
   });
   const logger = dependencies.logger ?? app.log;
@@ -50,7 +57,14 @@ export async function buildApp(
     logger,
   );
 
-  await app.register(websocket);
+  await app.register(websocket, {
+    options: {
+      maxPayload: Math.max(
+        env.MAX_JSON_MESSAGE_BYTES,
+        env.MAX_AUDIO_FRAME_BYTES,
+      ),
+    },
+  });
   await app.register(fastifyStatic, {
     root: resolve("public"),
   });
@@ -74,7 +88,21 @@ export async function buildApp(
     app,
     sessionManager,
     env.VOICE_INSTRUCTIONS,
+    {
+      maxJsonMessageBytes: env.MAX_JSON_MESSAGE_BYTES,
+      maxAudioFrameBytes: env.MAX_AUDIO_FRAME_BYTES,
+      idleTimeoutMs: env.IDLE_SESSION_TIMEOUT_MS,
+      maxSessionDurationMs: env.MAX_SESSION_DURATION_MS,
+      heartbeatIntervalMs: env.WEBSOCKET_HEARTBEAT_INTERVAL_MS,
+      maxPendingMessages: env.WEBSOCKET_MAX_PENDING_MESSAGES,
+      maxBufferedBytes: env.WEBSOCKET_MAX_BUFFERED_BYTES,
+      ...dependencies.voiceWebsocketOptions,
+    },
   );
+
+  app.addHook("onClose", async () => {
+    await sessionManager.closeAllSessions();
+  });
 
   return app;
 }

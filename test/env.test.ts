@@ -11,6 +11,13 @@ describe("environment configuration", () => {
       REALTIME_PROVIDER: "mock",
       OPENAI_REALTIME_MODEL: "gpt-realtime-2.1",
       VOICE_INSTRUCTIONS: "You are a helpful voice assistant.",
+      MAX_JSON_MESSAGE_BYTES: 65_536,
+      MAX_AUDIO_FRAME_BYTES: 262_144,
+      IDLE_SESSION_TIMEOUT_MS: 60_000,
+      MAX_SESSION_DURATION_MS: 1_800_000,
+      WEBSOCKET_HEARTBEAT_INTERVAL_MS: 30_000,
+      WEBSOCKET_MAX_PENDING_MESSAGES: 32,
+      WEBSOCKET_MAX_BUFFERED_BYTES: 1_048_576,
     });
   });
 

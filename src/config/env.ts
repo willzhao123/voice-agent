@@ -33,6 +33,41 @@ const environmentSchema = z
       .trim()
       .min(1)
       .default("You are a helpful voice assistant."),
+    MAX_JSON_MESSAGE_BYTES: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(64 * 1024),
+    MAX_AUDIO_FRAME_BYTES: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(256 * 1024),
+    IDLE_SESSION_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(60_000),
+    MAX_SESSION_DURATION_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(30 * 60_000),
+    WEBSOCKET_HEARTBEAT_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(30_000),
+    WEBSOCKET_MAX_PENDING_MESSAGES: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(32),
+    WEBSOCKET_MAX_BUFFERED_BYTES: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(1024 * 1024),
   })
   .superRefine((configuration, context) => {
     if (

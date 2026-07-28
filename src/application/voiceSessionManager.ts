@@ -139,6 +139,20 @@ export class VoiceSessionManager {
     await activeSession.closePromise;
   }
 
+  async closeAllSessions(): Promise<void> {
+    const sessionIds = [...this.activeSessions.keys()];
+    await Promise.all(sessionIds.map(async (sessionId) => {
+      try {
+        await this.closeSession(sessionId);
+      } catch (error) {
+        this.logger.error(
+          { err: error, sessionId },
+          "Failed to close voice session during shutdown",
+        );
+      }
+    }));
+  }
+
   private async createUniqueId(): Promise<string> {
     while (true) {
       const sessionId = this.createId();
@@ -182,7 +196,10 @@ export class VoiceSessionManager {
       await activeSession.realtimeSession.close();
     } catch (error) {
       closeError = error;
-      this.logger.error(error, "Failed to close realtime session");
+      this.logger.error(
+        { err: error, sessionId: session.id },
+        "Failed to close realtime session",
+      );
     }
 
     const closedSession = closeVoiceSession(session);
@@ -190,7 +207,10 @@ export class VoiceSessionManager {
       await this.sessionStore.save(closedSession);
     } catch (error) {
       closeError ??= error;
-      this.logger.error(error, "Failed to persist closed voice session");
+      this.logger.error(
+        { err: error, sessionId: session.id },
+        "Failed to persist closed voice session",
+      );
     }
 
     this.emit(session.id, {
@@ -222,7 +242,10 @@ export class VoiceSessionManager {
       try {
         listener(event);
       } catch (error) {
-        this.logger.error(error, "Voice session listener failed");
+        this.logger.error(
+          { err: error, sessionId },
+          "Voice session listener failed",
+        );
       }
     }
   }
