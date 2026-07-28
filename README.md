@@ -68,9 +68,12 @@ Client events:
 ```
 
 Caller audio and assistant audio use binary WebSocket frames. The OpenAI
-provider expects signed 16-bit mono PCM at 24 kHz; its assistant audio uses the
-same format. The included browser recorder is intended for the default mock
-provider until browser-side PCM capture is added. JSON server messages are
+provider and browser client assume raw signed 16-bit little-endian mono PCM at
+24 kHz in both directions, with no WAV or other container header. The browser
+captures at the device's native Web Audio sample rate, linearly resamples each
+chunk to 24 kHz, and sends it as PCM16. Assistant binary frames are decoded
+using the same PCM16/24 kHz assumption and scheduled for gapless playback.
+JSON server messages are
 `session.created`, `transcript.user.final`,
 `transcript.agent.delta`, `transcript.agent.final`,
 `output_audio.completed`, `response.started`, `response.completed`,

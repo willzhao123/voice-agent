@@ -1,6 +1,6 @@
+import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import Fastify, { type FastifyInstance } from "fastify";
-import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { VoiceSessionManager } from "./application/voiceSessionManager.js";
@@ -51,6 +51,9 @@ export async function buildApp(
   );
 
   await app.register(websocket);
+  await app.register(fastifyStatic, {
+    root: resolve("public"),
+  });
   app.get("/health", async () => ({ status: "ok" }));
   app.get("/ready", async (_request, reply) => {
     try {
@@ -65,18 +68,6 @@ export async function buildApp(
         provider: env.REALTIME_PROVIDER,
       });
     }
-  });
-
-  app.get("/", async (_request, reply) => {
-    const html = await readFile(resolve("public/index.html"), "utf8");
-    return reply.type("text/html; charset=utf-8").send(html);
-  });
-
-  app.get("/app.js", async (_request, reply) => {
-    const javascript = await readFile(resolve("public/app.js"), "utf8");
-    return reply
-      .type("text/javascript; charset=utf-8")
-      .send(javascript);
   });
 
   registerVoiceWebsocketRoute(

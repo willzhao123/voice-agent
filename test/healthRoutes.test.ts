@@ -16,6 +16,24 @@ afterEach(async () => {
 });
 
 describe("health endpoints", () => {
+  it("serves the browser test client from the public directory", async () => {
+    const app = await buildApp({
+      logger: silentLogger,
+      realtimeProvider: new MockRealtimeProvider(),
+    });
+    apps.push(app);
+
+    const page = await app.inject("/");
+    expect(page.statusCode).toBe(200);
+    expect(page.headers["content-type"]).toContain("text/html");
+    expect(page.body).toContain("Voice Agent Test Client");
+
+    const script = await app.inject("/app.js");
+    expect(script.statusCode).toBe(200);
+    expect(script.headers["content-type"]).toContain("javascript");
+    expect(script.body).toContain('type: "session.start"');
+  });
+
   it("reports health and mock-provider readiness", async () => {
     const app = await buildApp({
       logger: silentLogger,

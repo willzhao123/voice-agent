@@ -3,52 +3,98 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Voice Agent</title>
+    <title>Voice Agent Test Client</title>
     <style>
       :root {
-        color-scheme: dark;
         font-family: system-ui, sans-serif;
-        background: #10131a;
-        color: #f4f6fb;
       }
 
       body {
-        max-width: 42rem;
-        margin: 4rem auto;
-        padding: 0 1.25rem;
+        max-width: 48rem;
+        margin: 2rem auto;
+        padding: 0 1rem;
       }
 
-      button {
-        padding: 0.7rem 1rem;
-        margin-right: 0.5rem;
-        border: 0;
-        border-radius: 0.5rem;
-        cursor: pointer;
+      .controls,
+      form {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin: 1rem 0;
       }
 
-      #record {
-        background: #6d5dfc;
-        color: white;
+      button,
+      input {
+        padding: 0.5rem;
       }
 
-      #log {
-        min-height: 12rem;
-        padding: 1rem;
-        overflow: auto;
-        border-radius: 0.5rem;
-        background: #191e29;
+      input {
+        flex: 1 1 20rem;
+      }
+
+      output {
+        display: block;
+        min-height: 5rem;
+        padding: 0.75rem;
+        border: 1px solid #bbb;
         white-space: pre-wrap;
+      }
+
+      #status[data-state="connected"] {
+        color: green;
+      }
+
+      #status[data-state="error"],
+      #errors {
+        color: #b00020;
       }
     </style>
   </head>
   <body>
-    <h1>Voice Agent</h1>
-    <p id="status">Connecting…</p>
+    <h1>Voice Agent Test Client</h1>
     <p>
-      <button id="record" disabled>Start microphone</button>
-      <button id="commit" disabled>Commit audio</button>
+      Status:
+      <strong id="status" data-state="disconnected">Disconnected</strong>
     </p>
-    <pre id="log" aria-live="polite"></pre>
+
+    <div class="controls">
+      <button id="connect" type="button">Connect</button>
+      <button id="disconnect" type="button" disabled>Disconnect</button>
+      <button id="start-microphone" type="button" disabled>
+        Start microphone
+      </button>
+      <button id="stop-microphone" type="button" disabled>
+        Stop microphone
+      </button>
+      <button id="interrupt" type="button" disabled>
+        Interrupt assistant
+      </button>
+    </div>
+
+    <form id="text-form">
+      <input
+        id="text-input"
+        type="text"
+        placeholder="Send a text turn"
+        aria-label="Text input"
+        disabled
+      />
+      <button id="send-text" type="submit" disabled>Send text</button>
+    </form>
+
+    <h2>User transcript</h2>
+    <output id="user-transcript" aria-live="polite"></output>
+
+    <h2>Assistant transcript</h2>
+    <output id="assistant-transcript" aria-live="polite"></output>
+
+    <h2>Errors</h2>
+    <output id="errors" aria-live="assertive"></output>
+
+    <p>
+      Audio format: signed 16-bit little-endian mono PCM at 24 kHz, sent and
+      received as binary WebSocket frames.
+    </p>
     <script src="/app.js" defer></script>
   </body>
 </html>
