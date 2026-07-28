@@ -52,6 +52,7 @@ export interface RealtimeSession {
 }
 
 export interface RealtimeProvider {
+  initialize(): Promise<void>;
   openSession(
     options: RealtimeSessionOptions,
     onEvent: RealtimeEventListener,

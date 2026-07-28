@@ -24,6 +24,7 @@ interface ServerError {
 export function registerVoiceWebsocketRoute(
   app: FastifyInstance,
   sessionManager: VoiceSessionManager,
+  defaultInstructions: string,
 ): void {
   app.get("/v1/voice", { websocket: true }, (socket) => {
     let sessionId: string | undefined;
@@ -113,7 +114,10 @@ export function registerVoiceWebsocketRoute(
 
         const session = await sessionManager.createSession(
           forwardProviderEvent,
-          message.instructions,
+          combineInstructions(
+            defaultInstructions,
+            message.instructions,
+          ),
         );
         sessionId = session.id;
         sendJson({
@@ -239,4 +243,15 @@ function rawDataToBuffer(data: RawData): Buffer {
     return Buffer.concat(data);
   }
   return Buffer.from(data);
+}
+
+function combineInstructions(
+  defaultInstructions: string,
+  sessionInstructions: string,
+): string {
+  if (defaultInstructions === sessionInstructions) {
+    return defaultInstructions;
+  }
+
+  return `${defaultInstructions}\n\n${sessionInstructions}`;
 }

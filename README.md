@@ -24,6 +24,18 @@ The default `mock` realtime provider echoes audio events and completes responses
 without external credentials. The OpenAI realtime adapter is an explicit
 placeholder; it does not import or call an SDK yet.
 
+`GET /ready` returns `200` when the configured provider initializes and `503`
+otherwise. The OpenAI placeholder reports not-ready until its adapter is
+implemented.
+
+## Configuration
+
+Copy `.env.example` to `.env`. Supported settings are `HOST`, `PORT`,
+`LOG_LEVEL`, `REALTIME_PROVIDER`, `OPENAI_API_KEY`,
+`OPENAI_REALTIME_MODEL`, and `VOICE_INSTRUCTIONS`. `OPENAI_API_KEY` is required
+only when `REALTIME_PROVIDER=openai`; configuration errors stop startup without
+printing secret values.
+
 ## Architecture
 
 ```text

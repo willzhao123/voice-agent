@@ -6,6 +6,8 @@ import type {
 } from "../../ports/realtimeProvider.js";
 
 export class MockRealtimeProvider implements RealtimeProvider {
+  async initialize(): Promise<void> {}
+
   async openSession(
     options: RealtimeSessionOptions,
     onEvent: RealtimeEventListener,

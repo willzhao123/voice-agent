@@ -21,7 +21,12 @@ export interface AppDependencies {
 
 function createRealtimeProvider(): RealtimeProvider {
   if (env.REALTIME_PROVIDER === "openai") {
-    return new OpenAIRealtimeProvider(env.OPENAI_API_KEY);
+    return new OpenAIRealtimeProvider({
+      model: env.OPENAI_REALTIME_MODEL,
+      ...(env.OPENAI_API_KEY === undefined
+        ? {}
+        : { apiKey: env.OPENAI_API_KEY }),
+    });
   }
 
   return new MockRealtimeProvider();
@@ -47,6 +52,20 @@ export async function buildApp(
 
   await app.register(websocket);
   app.get("/health", async () => ({ status: "ok" }));
+  app.get("/ready", async (_request, reply) => {
+    try {
+      await provider.initialize();
+      return {
+        status: "ready",
+        provider: env.REALTIME_PROVIDER,
+      };
+    } catch {
+      return reply.code(503).send({
+        status: "not_ready",
+        provider: env.REALTIME_PROVIDER,
+      });
+    }
+  });
 
   app.get("/", async (_request, reply) => {
     const html = await readFile(resolve("public/index.html"), "utf8");
@@ -60,7 +79,11 @@ export async function buildApp(
       .send(javascript);
   });
 
-  registerVoiceWebsocketRoute(app, sessionManager);
+  registerVoiceWebsocketRoute(
+    app,
+    sessionManager,
+    env.VOICE_INSTRUCTIONS,
+  );
 
   return app;
 }
