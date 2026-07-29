@@ -11,6 +11,7 @@ import type {
 } from "../../application/voiceSessionManager.js";
 import {
   createTwilioClearMessage,
+  createTwilioMarkMessage,
   createTwilioMediaMessage,
   parseTwilioMessage,
   type TwilioInboundMessage,
@@ -76,6 +77,11 @@ export function registerTwilioMediaStreamRoute(
       let lastSequenceNumber = 0;
       let isAlive = true;
       let idleTimer: NodeJS.Timeout;
+      let responseActive = false;
+      let assistantAudioBuffered = false;
+      let nextPlaybackMark = 1;
+      const pendingPlaybackMarks = new Set<string>();
+      const clearedPlaybackMarks = new Set<string>();
 
       const clearConnectionTimers = (): void => {
         clearTimeout(idleTimer);
@@ -160,6 +166,63 @@ export function registerTwilioMediaStreamRoute(
         socket.send(serialized);
       };
 
+      const clearAssistantPlayback = (): void => {
+        if (streamSid === undefined) {
+          return;
+        }
+        for (const markName of pendingPlaybackMarks) {
+          clearedPlaybackMarks.add(markName);
+        }
+        pendingPlaybackMarks.clear();
+        assistantAudioBuffered = false;
+        send(createTwilioClearMessage(streamSid));
+      };
+
+      const markAssistantPlaybackBoundary = (): void => {
+        if (
+          streamSid === undefined ||
+          !assistantAudioBuffered
+        ) {
+          return;
+        }
+        const markName = `assistant-response-${nextPlaybackMark}`;
+        nextPlaybackMark += 1;
+        pendingPlaybackMarks.add(markName);
+        assistantAudioBuffered = false;
+        send(createTwilioMarkMessage(streamSid, markName));
+      };
+
+      const interruptActiveResponse = (): void => {
+        if (
+          !responseActive ||
+          sessionId === undefined ||
+          closing
+        ) {
+          return;
+        }
+        responseActive = false;
+        const activeSessionId = sessionId;
+        processing = processing.then(async () => {
+          if (closing) {
+            return;
+          }
+          try {
+            await sessionManager.interrupt(activeSessionId);
+          } catch (error) {
+            app.log.warn(
+              {
+                err: error,
+                sessionId: activeSessionId,
+                streamSid,
+                callSid,
+              },
+              "Failed to interrupt active Twilio voice response",
+            );
+            close(1011, "Failed to interrupt response");
+          }
+        });
+      };
+
       const onSessionEvent = (event: VoiceSessionEvent): void => {
         if (streamSid === undefined) {
           return;
@@ -167,11 +230,27 @@ export function registerTwilioMediaStreamRoute(
 
         switch (event.type) {
           case "output_audio.delta":
+            assistantAudioBuffered = true;
             send(createTwilioMediaMessage(streamSid, event.audio));
             break;
           case "input_audio.started":
+            clearAssistantPlayback();
+            interruptActiveResponse();
+            break;
+          case "output_audio.completed":
+            markAssistantPlaybackBoundary();
+            break;
+          case "response.started":
+            responseActive = true;
+            break;
+          case "response.completed":
+            responseActive = false;
+            break;
           case "response.interrupted":
-            send(createTwilioClearMessage(streamSid));
+            responseActive = false;
+            if (assistantAudioBuffered) {
+              clearAssistantPlayback();
+            }
             break;
           case "error":
             if (!event.recoverable) {
@@ -192,9 +271,6 @@ export function registerTwilioMediaStreamRoute(
           case "transcript.user.final":
           case "transcript.agent.delta":
           case "transcript.agent.final":
-          case "output_audio.completed":
-          case "response.started":
-          case "response.completed":
           case "session.started":
           case "session.ended":
             break;
@@ -294,6 +370,24 @@ export function registerTwilioMediaStreamRoute(
             );
             break;
           case "mark":
+            if (
+              state !== "streaming" ||
+              streamSid === undefined
+            ) {
+              throw new TwilioProtocolError(
+                `Twilio ${message.event} arrived before start`,
+              );
+            }
+            if (message.streamSid !== streamSid) {
+              throw new TwilioProtocolError(
+                `Twilio ${message.event} stream SID does not match`,
+              );
+            }
+            if (clearedPlaybackMarks.delete(message.mark.name)) {
+              break;
+            }
+            pendingPlaybackMarks.delete(message.mark.name);
+            break;
           case "dtmf":
             if (
               state !== "streaming" ||

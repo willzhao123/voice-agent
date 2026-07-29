@@ -258,8 +258,15 @@ voice activity detection. Incoming base64 media payloads are decoded and passed
 unchanged to the realtime provider. Provider audio deltas are encoded into
 Twilio `media` messages and sent back for call playback. Speech-start and
 interruption events send Twilio `clear` messages to discard buffered assistant
+audio, and active provider responses are cancelled when caller speech starts.
+The application sends Twilio `mark` events at assistant audio boundaries and
+tracks returned marks separately when a preceding `clear` released buffered
 audio. A Twilio `stop` event or WebSocket disconnect closes the realtime
 session.
+
+This basic barge-in implementation does not yet truncate conversation items
+using the precisely played audio duration. Duration-aware item truncation can
+be added later if exact provider conversation history alignment is required.
 
 Twilio webhook and WebSocket signatures are validated with the server-only auth
 token. Neither Twilio nor OpenAI credentials are exposed to the browser.

@@ -93,6 +93,14 @@ export interface TwilioClearOutputMessage {
   streamSid: string;
 }
 
+export interface TwilioMarkOutputMessage {
+  event: "mark";
+  streamSid: string;
+  mark: {
+    name: string;
+  };
+}
+
 export function parseTwilioMessage(
   value: unknown,
 ): TwilioInboundMessage {
@@ -118,5 +126,18 @@ export function createTwilioClearMessage(
   return {
     event: "clear",
     streamSid,
+  };
+}
+
+export function createTwilioMarkMessage(
+  streamSid: string,
+  name: string,
+): TwilioMarkOutputMessage {
+  return {
+    event: "mark",
+    streamSid,
+    mark: {
+      name,
+    },
   };
 }

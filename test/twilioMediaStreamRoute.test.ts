@@ -43,6 +43,8 @@ class MediaTrackingProvider implements RealtimeProvider {
   readonly audio: Buffer[] = [];
   closeCalls = 0;
   openCalls = 0;
+  interruptCalls = 0;
+  interruptPromise: Promise<void> | undefined;
 
   async initialize(): Promise<void> {}
 
@@ -64,7 +66,10 @@ class MediaTrackingProvider implements RealtimeProvider {
       },
       async commitInputAudio() {},
       async sendText() {},
-      async interrupt() {},
+      interrupt: async () => {
+        this.interruptCalls += 1;
+        await this.interruptPromise;
+      },
       close: async () => {
         this.closeCalls += 1;
       },
@@ -142,6 +147,24 @@ function sendStart(socket: WebSocket): void {
         channels: 1,
       },
       customParameters: {},
+    },
+  }));
+}
+
+function sendMedia(
+  socket: WebSocket,
+  sequenceNumber: number,
+  audio: Buffer,
+): void {
+  socket.send(JSON.stringify({
+    event: "media",
+    sequenceNumber: String(sequenceNumber),
+    streamSid: "MZ123",
+    media: {
+      track: "inbound",
+      chunk: String(sequenceNumber - 1),
+      timestamp: String((sequenceNumber - 2) * 20),
+      payload: audio.toString("base64"),
     },
   }));
 }
@@ -253,6 +276,89 @@ describe("GET /v1/twilio/media", () => {
 
     socket.terminate();
     await waitFor(() => provider.closeCalls === 1);
+  });
+
+  it("clears playback, interrupts once, and keeps accepting caller audio", async () => {
+    const { messages, provider, socket } = await createHarness();
+    sendConnected(socket);
+    sendStart(socket);
+    await waitFor(() => provider.listener !== undefined);
+
+    provider.listener?.({ type: "response.started" });
+    const outboundAudio = Buffer.from([0x10, 0x20, 0x30]);
+    provider.listener?.({
+      type: "output_audio.delta",
+      audio: outboundAudio,
+    });
+    provider.listener?.({ type: "output_audio.completed" });
+
+    await waitFor(() => messages.length === 2);
+    expect(messages[0]).toEqual({
+      event: "media",
+      streamSid: "MZ123",
+      media: {
+        payload: outboundAudio.toString("base64"),
+      },
+    });
+    expect(messages[1]).toEqual({
+      event: "mark",
+      streamSid: "MZ123",
+      mark: {
+        name: "assistant-response-1",
+      },
+    });
+
+    provider.listener?.({ type: "input_audio.started" });
+    provider.listener?.({ type: "input_audio.started" });
+    await waitFor(() => provider.interruptCalls === 1);
+    expect(
+      messages.filter((message) => message.event === "clear"),
+    ).toHaveLength(2);
+
+    socket.send(JSON.stringify({
+      event: "mark",
+      sequenceNumber: "2",
+      streamSid: "MZ123",
+      mark: {
+        name: "assistant-response-1",
+      },
+    }));
+    const firstCallerAudio = Buffer.from([0xff, 0x7f]);
+    const nextCallerAudio = Buffer.from([0x00, 0x80]);
+    sendMedia(socket, 3, firstCallerAudio);
+    sendMedia(socket, 4, nextCallerAudio);
+
+    await waitFor(() => provider.audio.length === 2);
+    expect(provider.audio).toEqual([
+      firstCallerAudio,
+      nextCallerAudio,
+    ]);
+
+    provider.listener?.({ type: "response.interrupted" });
+    expect(
+      messages.filter((message) => message.event === "clear"),
+    ).toHaveLength(2);
+  });
+
+  it("cleans up exactly once when the socket closes during interruption", async () => {
+    const { provider, socket } = await createHarness();
+    let releaseInterrupt: (() => void) | undefined;
+    provider.interruptPromise = new Promise<void>((resolve) => {
+      releaseInterrupt = resolve;
+    });
+    sendConnected(socket);
+    sendStart(socket);
+    await waitFor(() => provider.listener !== undefined);
+
+    provider.listener?.({ type: "response.started" });
+    provider.listener?.({ type: "input_audio.started" });
+    await waitFor(() => provider.interruptCalls === 1);
+
+    socket.terminate();
+    releaseInterrupt?.();
+    await waitFor(() => provider.closeCalls === 1);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(provider.closeCalls).toBe(1);
   });
 
   it("rejects media before start without creating a session", async () => {
