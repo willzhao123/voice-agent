@@ -228,21 +228,72 @@ scheduled for playback.
 
 ## Twilio Programmable Voice
 
-Twilio support uses bidirectional Media Streams without changing the browser
+### Architecture
+
+Twilio support uses a bidirectional Media Stream without changing the browser
 protocol:
 
-1. Set `TWILIO_ENABLED=true`.
-2. Configure a Twilio phone number's incoming-call webhook as
-   `POST https://your-public-host/v1/twilio/voice`.
-3. Set `TWILIO_AUTH_TOKEN` to that Twilio account's auth token.
-4. Set `PUBLIC_BASE_URL` to the externally visible HTTPS origin, such as
-   `https://voice.example.com`. This ensures signature validation uses the
-   exact URL Twilio signed when the application is behind a proxy.
-5. Leave `TWILIO_VALIDATE_SIGNATURES=true`.
-6. Set `REALTIME_PROVIDER=openai` and configure `OPENAI_API_KEY`.
-7. Expose the application over HTTPS/WSS on public port 443.
+```text
+Caller
+  │
+  ▼
+Twilio Programmable Voice
+  │  signed form POST /v1/twilio/voice
+  ▼
+Fastify ──► TwiML <Response><Connect><Stream>
+  ▲
+  │  signed WSS GET /v1/twilio/media
+  │  connected/start/media/mark/stop JSON
+  ▼
+Twilio media adapter
+  │  raw G.711 μ-law/8 kHz audio
+  ▼
+VoiceSessionManager ──► RealtimeProvider ──► OpenAI Realtime
+```
 
-The signed webhook returns TwiML containing:
+The webhook and Media Stream upgrade have independent Twilio signature checks.
+Each `start` event creates one isolated voice session and one realtime-provider
+connection. A Twilio `stop`, WebSocket disconnect, provider failure, timeout,
+or application shutdown closes that provider connection exactly once.
+
+### Environment configuration
+
+The Twilio-related variables are:
+
+| Variable | Required value |
+| --- | --- |
+| `TWILIO_ENABLED` | `true` to register both Twilio routes |
+| `TWILIO_AUTH_TOKEN` | The server-only primary Auth Token for the Twilio project receiving the call |
+| `PUBLIC_BASE_URL` | The exact externally visible HTTPS origin, without either route path |
+| `TWILIO_VALIDATE_SIGNATURES` | Keep `true`; `false` is restricted to explicit loopback automated tests |
+| `REALTIME_PROVIDER` | Use `openai` for a conversational phone call |
+| `OPENAI_API_KEY` | Server-only key required when the provider is `openai` |
+| `OPENAI_REALTIME_MODEL` | Realtime model selected for the provider connection |
+
+Neither Twilio nor OpenAI credentials are sent to `public/` or included in
+WebSocket messages. Do not put the ngrok authtoken in this application's
+`.env`; keep it in ngrok's own configuration.
+
+### Incoming-call and Twilio Console setup
+
+1. Use an upgraded Twilio project with a voice-capable Twilio phone number.
+2. Expose this application at a stable public HTTPS/WSS origin.
+3. Set `PUBLIC_BASE_URL` to that exact origin. For example, if the webhook is
+   `https://voice.example.com/v1/twilio/voice`, set
+   `PUBLIC_BASE_URL=https://voice.example.com`.
+4. Set `TWILIO_AUTH_TOKEN` to the primary Auth Token belonging to the same
+   Twilio project as the phone number. Test credentials and API-key secrets do
+   not validate inbound webhook signatures.
+5. Set `TWILIO_ENABLED=true`, `TWILIO_VALIDATE_SIGNATURES=true`,
+   `REALTIME_PROVIDER=openai`, and `OPENAI_API_KEY`.
+6. In Twilio Console, open **Phone Numbers → Manage → Active numbers**, select
+   the number, and find its incoming Voice configuration.
+7. For **A call comes in**, select **Webhook**, enter
+   `https://your-public-host/v1/twilio/voice`, select **HTTP POST**, and save.
+8. Call the Twilio number. Twilio should receive XML from the webhook and then
+   open the Media Stream automatically.
+
+The signed incoming webhook returns:
 
 ```xml
 <Response>
@@ -252,17 +303,104 @@ The signed webhook returns TwiML containing:
 </Response>
 ```
 
-Twilio then opens the signed Media Stream WebSocket. Its `start` event creates
-an isolated voice session configured for G.711 μ-law at 8 kHz and server-side
-voice activity detection. Incoming base64 media payloads are decoded and passed
-unchanged to the realtime provider. Provider audio deltas are encoded into
-Twilio `media` messages and sent back for call playback. Speech-start and
-interruption events send Twilio `clear` messages to discard buffered assistant
-audio, and active provider responses are cancelled when caller speech starts.
-The application sends Twilio `mark` events at assistant audio boundaries and
-tracks returned marks separately when a preceding `clear` released buffered
-audio. A Twilio `stop` event or WebSocket disconnect closes the realtime
-session.
+`<Connect><Stream>` is bidirectional: Twilio sends caller audio to the
+application and accepts assistant audio for playback. It also blocks later
+TwiML until the stream disconnects. See Twilio's
+[Media Streams overview](https://www.twilio.com/docs/voice/media-streams).
+
+### Local testing with ngrok
+
+An ngrok tunnel can expose the local Fastify port while leaving the application
+on plain HTTP locally:
+
+```sh
+# In terminal 1
+ngrok config add-authtoken YOUR_NGROK_AUTHTOKEN
+ngrok http 3000
+```
+
+Copy the HTTPS forwarding origin printed by ngrok, then configure the
+application:
+
+```dotenv
+TWILIO_ENABLED=true
+TWILIO_AUTH_TOKEN=your-primary-twilio-auth-token
+PUBLIC_BASE_URL=https://your-current-ngrok-domain.ngrok.app
+TWILIO_VALIDATE_SIGNATURES=true
+REALTIME_PROVIDER=openai
+OPENAI_API_KEY=your-server-only-openai-key
+```
+
+```sh
+# In terminal 2, after updating .env
+npm run dev
+```
+
+Set the Twilio Console incoming-call webhook to
+`https://your-current-ngrok-domain.ngrok.app/v1/twilio/voice` using `POST`.
+Restart the application and update the Console URL whenever a non-static ngrok
+domain changes. Keep signature validation enabled: ngrok terminates public TLS,
+but signatures still validate because `PUBLIC_BASE_URL` reconstructs the exact
+public URL Twilio used. Twilio recommends a public tunnel such as ngrok for
+[local webhook testing](https://www.twilio.com/docs/voice/troubleshooting).
+
+### Trial-account restrictions
+
+Current Twilio trial accounts cannot run this integration because the
+`<Stream>` verb is blocked in trial TwiML. Upgrade the project before testing a
+Media Stream. Trial Voice also limits calls to verified numbers, limits
+geography and call usage, and applies other account restrictions. Consult the
+current [Twilio Voice trial restrictions](https://www.twilio.com/docs/usage/trials/try-out-voice)
+before assuming a Console or carrier failure is an application bug.
+
+### Media event flow
+
+1. Twilio sends `connected`.
+2. Twilio sends `start`; the application validates `audio/x-mulaw`, 8,000 Hz,
+   and one channel, captures `streamSid`/`callSid`, and starts a realtime
+   session with server VAD.
+3. Each inbound `media.payload` is base64-decoded and forwarded as unchanged
+   μ-law bytes. The application does not commit individual Twilio media frames;
+   OpenAI server VAD creates turns and responses.
+4. OpenAI `output_audio.delta` bytes are base64-encoded into Twilio `media`
+   events for playback.
+5. At an assistant audio boundary, the application sends a `mark`. A returned
+   mark identifies normally completed playback or a mark released by `clear`.
+6. Inbound `dtmf` and returned `mark` events are validated and sequenced but do
+   not currently invoke business logic.
+7. Twilio `stop` or WebSocket close ends the voice session and closes its
+   OpenAI connection.
+
+Twilio event schemas, stream SIDs, sequence numbers, ordering, frame size,
+backpressure, idle timeout, maximum duration, and heartbeat state are all
+validated or bounded.
+
+### Audio-format differences
+
+| Path | Input and output encoding | Turn detection |
+| --- | --- | --- |
+| Browser `/v1/voice` | Headerless mono signed PCM16 little-endian at 24 kHz | Manual; stopping the microphone sends `input_audio.commit` |
+| Twilio `/v1/twilio/media` | Headerless G.711 μ-law (`audio/x-mulaw` / OpenAI `audio/pcmu`) at 8 kHz, mono | OpenAI `server_vad` with automatic response creation and interruption |
+
+No transcoding occurs on the Twilio path: decoded inbound μ-law bytes go
+directly to OpenAI, and OpenAI μ-law output goes directly back to Twilio.
+Twilio `media.payload` must not include WAV or other file headers. The browser
+path remains independent and continues to resample microphone input to
+PCM16/24 kHz.
+
+### Barge-in behavior
+
+When OpenAI reports that caller speech started during an active response, the
+application:
+
+1. sends Twilio `clear` to discard buffered assistant playback;
+2. cancels the active OpenAI response once, without redundant cancellation when
+   no response is active; and
+3. continues forwarding new caller media.
+
+Assistant response boundaries produce Twilio marks. Marks returned after a
+clear are tracked separately from normal playback completion, matching
+Twilio's documented [media, mark, and clear behavior](https://www.twilio.com/docs/voice/media-streams/websocket-messages).
 
 This basic barge-in implementation does not yet truncate conversation items
 using the precisely played audio duration. Duration-aware item truncation can
@@ -282,9 +420,34 @@ automated tests and is rejected unless `PUBLIC_BASE_URL` uses an HTTPS loopback
 host. `TWILIO_AUTH_TOKEN` and an HTTPS `PUBLIC_BASE_URL` remain required
 whenever Twilio is enabled.
 
-Twilio Media Streams require raw headerless `audio/x-mulaw` at 8 kHz. The
-OpenAI adapter selects `audio/pcmu` for both input and output, so this path does
-not transcode audio. Browser sessions continue to use PCM16/24 kHz.
+### Troubleshooting
+
+- **Webhook returns 403:** confirm `TWILIO_AUTH_TOKEN` is the primary Auth Token
+  for the correct project; confirm the Console URL, method (`POST`), and
+  `PUBLIC_BASE_URL` match exactly. Do not derive the public URL from proxy
+  headers.
+- **Webhook works but the Media Stream closes with policy violation:** confirm
+  the WSS handshake signature is calculated for the exact `wss://` stream URL
+  produced in the TwiML, and that the ngrok/public hostname did not change.
+- **Twilio reports that Stream is unavailable:** trial accounts currently block
+  `<Stream>`; upgrade the project.
+- **No WebSocket connection appears:** verify the public endpoint supports WSS
+  on port 443, has a trusted TLS certificate, and forwards WebSocket upgrades
+  to port 3000.
+- **Call connects but no assistant audio is heard:** confirm
+  `REALTIME_PROVIDER=openai`, the OpenAI key/model are valid, and the provider
+  accepted `audio/pcmu` input/output with server VAD.
+- **Audio is distorted:** send raw headerless μ-law/8 kHz audio only. Do not
+  send PCM16, WAV headers, or arbitrary encoded files through the Twilio path.
+- **Barge-in does not clear playback:** look for OpenAI speech-start events and
+  Twilio `clear`/returned `mark` traffic; confirm server VAD is enabled.
+- **A call stops unexpectedly:** check application logs for the session ID and
+  timeout/backpressure reason. Then inspect Twilio Console's **Debugger** and
+  the call's **Request Inspector**, as recommended in Twilio's
+  [Voice troubleshooting guide](https://www.twilio.com/docs/voice/troubleshooting).
+- **ngrok worked previously:** free/non-static tunnel domains can change.
+  Update both `PUBLIC_BASE_URL` and the Twilio Console webhook, then restart the
+  application.
 
 ## Selecting a realtime provider
 
