@@ -1,7 +1,10 @@
 import formbody from "@fastify/formbody";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, {
+  type FastifyBaseLogger,
+  type FastifyInstance,
+} from "fastify";
 import { resolve } from "node:path";
 
 import { VoiceSessionManager } from "./application/voiceSessionManager.js";
@@ -21,7 +24,10 @@ import {
   registerVoiceWebsocketRoute,
   type VoiceWebsocketOptions,
 } from "./adapters/websocket/voiceWebsocketRoute.js";
-import { env } from "./config/env.js";
+import {
+  env,
+  isLoopbackHostname,
+} from "./config/env.js";
 import type { RealtimeProvider } from "./ports/realtimeProvider.js";
 import type { SessionStore } from "./ports/sessionStore.js";
 import {
@@ -31,6 +37,7 @@ import {
 
 export interface AppDependencies {
   logger?: Logger;
+  loggerInstance?: FastifyBaseLogger;
   realtimeProvider?: RealtimeProvider;
   sessionStore?: SessionStore;
   voiceWebsocketOptions?: Partial<VoiceWebsocketOptions>;
@@ -67,12 +74,16 @@ function createRealtimeProvider(): RealtimeProvider {
 export async function buildApp(
   dependencies: AppDependencies = {},
 ): Promise<FastifyInstance> {
-  const app = Fastify({
-    logger:
-      dependencies.logger === undefined
-        ? createLoggerOptions(env.LOG_LEVEL)
-        : false,
-  });
+  const app = dependencies.loggerInstance === undefined
+    ? Fastify({
+        logger:
+          dependencies.logger === undefined
+            ? createLoggerOptions(env.LOG_LEVEL)
+            : false,
+      })
+    : Fastify({
+        loggerInstance: dependencies.loggerInstance,
+      });
   const logger = dependencies.logger ?? app.log;
   const provider = dependencies.realtimeProvider ?? createRealtimeProvider();
   const sessionStore = dependencies.sessionStore ?? new MemorySessionStore();
@@ -141,6 +152,21 @@ export async function buildApp(
     if (twilioPublicBaseUrl === undefined) {
       throw new Error(
         "PUBLIC_BASE_URL is required when Twilio is enabled",
+      );
+    }
+    const parsedTwilioPublicBaseUrl =
+      new URL(twilioPublicBaseUrl);
+    if (parsedTwilioPublicBaseUrl.protocol !== "https:") {
+      throw new Error(
+        "PUBLIC_BASE_URL must be HTTPS when Twilio is enabled",
+      );
+    }
+    if (
+      !twilioValidateSignatures &&
+      !isLoopbackHostname(parsedTwilioPublicBaseUrl.hostname)
+    ) {
+      throw new Error(
+        "Twilio signature validation can be disabled only for local automated testing",
       );
     }
     registerTwilioVoiceRoute(app, {

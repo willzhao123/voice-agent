@@ -490,7 +490,7 @@ export function registerTwilioMediaStreamRoute(
           .catch((error: unknown) => {
             app.log.warn(
               {
-                err: error,
+                validationError: getSafeErrorName(error),
                 sessionId,
                 streamSid,
                 callSid,
@@ -520,11 +520,19 @@ class TwilioProtocolError extends Error {
 function getWebsocketRequestUrl(
   publicBaseUrl: string,
 ): string {
+  // Twilio is configured with a wss URL even though the WebSocket upgrade
+  // itself is transported as an HTTPS request. Its signature is calculated
+  // from the configured wss URL, so do not validate against Fastify's
+  // internal http/https request URL.
   const url = new URL(
     getPublicRouteUrl(publicBaseUrl, "/v1/twilio/media"),
   );
   url.protocol = "wss:";
   return url.toString();
+}
+
+function getSafeErrorName(error: unknown): string {
+  return error instanceof Error ? error.name : "UnknownError";
 }
 
 function readSignature(

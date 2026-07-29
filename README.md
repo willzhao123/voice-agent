@@ -272,7 +272,10 @@ Twilio webhook and WebSocket signatures are validated with the server-only auth
 token. Neither Twilio nor OpenAI credentials are exposed to the browser.
 The signed URLs are constructed only from `PUBLIC_BASE_URL` and fixed route
 paths; request host and forwarded headers are not trusted for signature
-validation or TwiML generation.
+validation or TwiML generation. The Voice webhook is validated against its
+public `https://` URL. The Media Stream upgrade is validated against the
+configured `wss://` stream URL, even though the WebSocket handshake travels
+over HTTPS, using the official Twilio Node request validator.
 
 `TWILIO_VALIDATE_SIGNATURES=false` is provided only for explicit local
 automated tests and is rejected unless `PUBLIC_BASE_URL` uses an HTTPS loopback

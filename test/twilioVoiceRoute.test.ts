@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
+import twilio from "twilio";
 
 import type {
   TwilioSignatureInput,
   TwilioSignatureValidator,
 } from "../src/adapters/twilio/twilioSignatureValidator.js";
+import { DefaultTwilioSignatureValidator } from "../src/adapters/twilio/twilioSignatureValidator.js";
 import { MockRealtimeProvider } from "../src/adapters/realtime/mockRealtimeProvider.js";
 import { buildApp } from "../src/app.js";
 import { createLogger } from "../src/shared/logger.js";
@@ -32,13 +34,25 @@ implements TwilioSignatureValidator {
 }
 
 describe("POST /v1/twilio/voice", () => {
-  it("validates the webhook and returns bidirectional Stream TwiML", async () => {
-    const validator = new RecordingSignatureValidator(true);
+  it("accepts a valid official Twilio webhook signature", async () => {
+    const authToken = "test-only-twilio-auth-token";
+    const publicUrl =
+      "https://voice.example.com/v1/twilio/voice";
+    const params = {
+      CallSid: "CA123",
+      From: "+15551234567",
+    };
+    const signature = twilio.getExpectedTwilioSignature(
+      authToken,
+      publicUrl,
+      params,
+    );
     const app = await buildApp({
       logger: silentLogger,
       realtimeProvider: new MockRealtimeProvider(),
       twilioEnabled: true,
-      twilioSignatureValidator: validator,
+      twilioSignatureValidator:
+        new DefaultTwilioSignatureValidator(authToken),
       publicBaseUrl: "https://voice.example.com",
     });
     apps.push(app);
@@ -48,7 +62,7 @@ describe("POST /v1/twilio/voice", () => {
       url: "/v1/twilio/voice",
       headers: {
         "content-type": "application/x-www-form-urlencoded",
-        "x-twilio-signature": "test-signature",
+        "x-twilio-signature": signature,
         host: "attacker.example",
         "x-forwarded-host": "attacker.example",
         "x-forwarded-proto": "http",
@@ -62,25 +76,16 @@ describe("POST /v1/twilio/voice", () => {
     expect(response.body).toContain(
       '<Stream url="wss://voice.example.com/v1/twilio/media"/>',
     );
-    expect(validator.inputs).toEqual([
-      {
-        signature: "test-signature",
-        url: "https://voice.example.com/v1/twilio/voice",
-        params: {
-          CallSid: "CA123",
-          From: "+15551234567",
-        },
-      },
-    ]);
   });
 
-  it("rejects a webhook with an invalid signature", async () => {
+  it("rejects an invalid official Twilio webhook signature", async () => {
+    const authToken = "test-only-twilio-auth-token";
     const app = await buildApp({
       logger: silentLogger,
       realtimeProvider: new MockRealtimeProvider(),
       twilioEnabled: true,
       twilioSignatureValidator:
-        new RecordingSignatureValidator(false),
+        new DefaultTwilioSignatureValidator(authToken),
       publicBaseUrl: "https://voice.example.com",
     });
     apps.push(app);
@@ -91,6 +96,31 @@ describe("POST /v1/twilio/voice", () => {
       headers: {
         "content-type": "application/x-www-form-urlencoded",
         "x-twilio-signature": "invalid",
+      },
+      payload: "CallSid=CA123",
+    });
+
+    expect(response.statusCode).toBe(403);
+  });
+
+  it("rejects a missing Twilio webhook signature", async () => {
+    const app = await buildApp({
+      logger: silentLogger,
+      realtimeProvider: new MockRealtimeProvider(),
+      twilioEnabled: true,
+      twilioSignatureValidator:
+        new DefaultTwilioSignatureValidator(
+          "test-only-twilio-auth-token",
+        ),
+      publicBaseUrl: "https://voice.example.com",
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/twilio/voice",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
       },
       payload: "CallSid=CA123",
     });
@@ -121,6 +151,18 @@ describe("POST /v1/twilio/voice", () => {
 
     expect(response.statusCode).toBe(200);
     expect(validator.inputs).toEqual([]);
+  });
+
+  it("refuses to disable signatures for a non-loopback public URL", async () => {
+    await expect(buildApp({
+      logger: silentLogger,
+      realtimeProvider: new MockRealtimeProvider(),
+      twilioEnabled: true,
+      twilioValidateSignatures: false,
+      publicBaseUrl: "https://voice.example.com",
+    })).rejects.toThrow(
+      "Twilio signature validation can be disabled only for local automated testing",
+    );
   });
 
   it("does not register the webhook when Twilio is disabled", async () => {

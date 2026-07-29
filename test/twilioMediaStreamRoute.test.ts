@@ -1,8 +1,12 @@
 import { once } from "node:events";
+import { Writable } from "node:stream";
 
 import { afterEach, describe, expect, it } from "vitest";
+import pino from "pino";
+import twilio from "twilio";
 import type { WebSocket } from "ws";
 
+import { DefaultTwilioSignatureValidator } from "../src/adapters/twilio/twilioSignatureValidator.js";
 import type {
   TwilioSignatureInput,
   TwilioSignatureValidator,
@@ -14,7 +18,10 @@ import type {
   RealtimeSession,
   RealtimeSessionOptions,
 } from "../src/ports/realtimeProvider.js";
-import { createLogger } from "../src/shared/logger.js";
+import {
+  createLogger,
+  createLoggerOptions,
+} from "../src/shared/logger.js";
 
 const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
 const silentLogger = createLogger("silent");
@@ -83,19 +90,42 @@ async function createHarness(
     idleTimeoutMs?: number;
     maxSessionDurationMs?: number;
     heartbeatIntervalMs?: number;
+    signatureValidator?: TwilioSignatureValidator;
+    signature?: string;
+    validateSignatures?: boolean;
+    publicBaseUrl?: string;
   } = {},
 ) {
   const provider = new MediaTrackingProvider();
-  const validator = new AllowSignatureValidator();
+  const validator =
+    options.signatureValidator ?? new AllowSignatureValidator();
   const app = await buildApp({
     logger: silentLogger,
     realtimeProvider: provider,
     twilioEnabled: true,
+    ...(options.validateSignatures === undefined
+      ? {}
+      : {
+          twilioValidateSignatures:
+            options.validateSignatures,
+        }),
     twilioSignatureValidator: validator,
-    publicBaseUrl: "https://voice.example.com",
+    publicBaseUrl:
+      options.publicBaseUrl ?? "https://voice.example.com",
     twilioMediaStreamOptions: {
       heartbeatIntervalMs: 10_000,
-      ...options,
+      ...(options.maxMessageBytes === undefined
+        ? {}
+        : { maxMessageBytes: options.maxMessageBytes }),
+      ...(options.idleTimeoutMs === undefined
+        ? {}
+        : { idleTimeoutMs: options.idleTimeoutMs }),
+      ...(options.maxSessionDurationMs === undefined
+        ? {}
+        : { maxSessionDurationMs: options.maxSessionDurationMs }),
+      ...(options.heartbeatIntervalMs === undefined
+        ? {}
+        : { heartbeatIntervalMs: options.heartbeatIntervalMs }),
     },
   });
   apps.push(app);
@@ -106,7 +136,8 @@ async function createHarness(
     "/v1/twilio/media",
     {
       headers: {
-        "x-twilio-signature": "media-signature",
+        "x-twilio-signature":
+          options.signature ?? "media-signature",
       },
     },
     {
@@ -120,7 +151,7 @@ async function createHarness(
     },
   );
 
-  return { app, messages, provider, socket, validator };
+  return { app, messages, provider, socket };
 }
 
 function sendConnected(socket: WebSocket): void {
@@ -182,13 +213,196 @@ async function waitFor(
   }
 }
 
+async function createOfficialSignatureApp(
+  authToken: string,
+  logger = silentLogger,
+) {
+  const provider = new MediaTrackingProvider();
+  const app = await buildApp({
+    logger,
+    realtimeProvider: provider,
+    twilioEnabled: true,
+    twilioSignatureValidator:
+      new DefaultTwilioSignatureValidator(authToken),
+    publicBaseUrl: "https://voice.example.com",
+    twilioMediaStreamOptions: {
+      heartbeatIntervalMs: 10_000,
+    },
+  });
+  apps.push(app);
+  await app.ready();
+  return { app, provider };
+}
+
+async function expectRejectedHandshake(
+  app: Awaited<ReturnType<typeof buildApp>>,
+  signature?: string,
+): Promise<number> {
+  let resolveClose:
+    ((value: number) => void) | undefined;
+  const closed = new Promise<number>((resolve) => {
+    resolveClose = resolve;
+  });
+  await app.injectWS(
+    "/v1/twilio/media",
+    {
+      headers: signature === undefined
+        ? {}
+        : { "x-twilio-signature": signature },
+    },
+    {
+      onInit(websocket) {
+        websocket.on("close", (code) => {
+          resolveClose?.(code);
+        });
+      },
+    },
+  );
+  return closed;
+}
+
 describe("GET /v1/twilio/media", () => {
+  it("accepts a valid official Twilio WebSocket signature", async () => {
+    const authToken = "test-only-twilio-auth-token";
+    const signature = twilio.getExpectedTwilioSignature(
+      authToken,
+      "wss://voice.example.com/v1/twilio/media",
+      {},
+    );
+    const { app, provider } =
+      await createOfficialSignatureApp(authToken);
+    const socket = await app.injectWS(
+      "/v1/twilio/media",
+      {
+        headers: {
+          "x-twilio-signature": signature,
+          host: "attacker.example",
+          "x-forwarded-host": "attacker.example",
+          "x-forwarded-proto": "http",
+        },
+      },
+    );
+
+    sendConnected(socket);
+    sendStart(socket);
+    await waitFor(() => provider.openCalls === 1);
+    socket.terminate();
+  });
+
+  it("rejects invalid and missing WebSocket signatures", async () => {
+    const authToken = "test-only-twilio-auth-token";
+    const { app, provider } =
+      await createOfficialSignatureApp(authToken);
+
+    await expect(
+      expectRejectedHandshake(app, "invalid-signature"),
+    ).resolves.toBe(1008);
+    await expect(
+      expectRejectedHandshake(app),
+    ).resolves.toBe(1008);
+    expect(provider.openCalls).toBe(0);
+  });
+
+  it("bypasses WebSocket validation only when explicitly configured", async () => {
+    const validator = new AllowSignatureValidator();
+    const { provider, socket } = await createHarness({
+      signatureValidator: validator,
+      validateSignatures: false,
+      publicBaseUrl: "https://localhost",
+    });
+
+    sendConnected(socket);
+    sendStart(socket);
+    await waitFor(() => provider.openCalls === 1);
+    expect(validator.input).toBeUndefined();
+    socket.terminate();
+  });
+
+  it("never logs Twilio secrets, raw audio, or full media payloads", async () => {
+    let logOutput = "";
+    const destination = new Writable({
+      write(chunk, _encoding, callback) {
+        logOutput += chunk.toString();
+        callback();
+      },
+    });
+    const applicationLogger = pino(
+      createLoggerOptions("info"),
+      destination,
+    );
+    const authToken = "TWILIO_AUTH_TOKEN_MUST_NOT_APPEAR";
+    const signatureSecret =
+      "TWILIO_SIGNATURE_MUST_NOT_APPEAR";
+    const provider = new MediaTrackingProvider();
+    const app = await buildApp({
+      logger: applicationLogger,
+      loggerInstance: applicationLogger,
+      realtimeProvider: provider,
+      twilioEnabled: true,
+      twilioSignatureValidator:
+        new DefaultTwilioSignatureValidator(authToken),
+      publicBaseUrl: "https://voice.example.com",
+      twilioMediaStreamOptions: {
+        heartbeatIntervalMs: 10_000,
+      },
+    });
+    apps.push(app);
+    await app.ready();
+
+    await expect(
+      expectRejectedHandshake(app, signatureSecret),
+    ).resolves.toBe(1008);
+
+    const validSignature = twilio.getExpectedTwilioSignature(
+      authToken,
+      "wss://voice.example.com/v1/twilio/media",
+      {},
+    );
+    const socket = await app.injectWS(
+      "/v1/twilio/media",
+      {
+        headers: {
+          "x-twilio-signature": validSignature,
+        },
+      },
+    );
+    sendConnected(socket);
+    sendStart(socket);
+    await waitFor(() => provider.openCalls === 1);
+
+    const rawAudioText = "RAW_AUDIO_MUST_NOT_APPEAR";
+    const fullMediaPayload =
+      Buffer.from(rawAudioText).toString("base64");
+    sendMedia(socket, 2, Buffer.from(rawAudioText));
+    await waitFor(() => provider.audio.length === 1);
+
+    const closePromise = once(socket, "close");
+    socket.send(JSON.stringify({
+      event: "media",
+      sequenceNumber: "3",
+      streamSid: "MZ123",
+      media: {
+        track: "invalid-track",
+        chunk: "2",
+        timestamp: "20",
+        payload: fullMediaPayload,
+      },
+    }));
+    await closePromise;
+    await waitFor(() => provider.closeCalls === 1);
+
+    expect(logOutput).not.toContain(authToken);
+    expect(logOutput).not.toContain(signatureSecret);
+    expect(logOutput).not.toContain(validSignature);
+    expect(logOutput).not.toContain(rawAudioText);
+    expect(logOutput).not.toContain(fullMediaPayload);
+  });
+
   it("relays μ-law audio bidirectionally and closes on stop", async () => {
     const {
       messages,
       provider,
       socket,
-      validator,
     } = await createHarness();
     sendConnected(socket);
     sendStart(socket);
@@ -233,11 +447,6 @@ describe("GET /v1/twilio/media", () => {
       turnDetection: "server_vad",
     });
     expect(provider.audio).toEqual([inboundAudio]);
-    expect(validator.input).toEqual({
-      signature: "media-signature",
-      url: "wss://voice.example.com/v1/twilio/media",
-    });
-
     const outboundAudio = Buffer.from([0x10, 0x20, 0x30]);
     provider.listener?.({
       type: "output_audio.delta",

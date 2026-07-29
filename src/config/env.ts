@@ -162,7 +162,7 @@ export function parseEnvironment(
 
 export const env = parseEnvironment(process.env);
 
-function isLoopbackHostname(hostname: string): boolean {
+export function isLoopbackHostname(hostname: string): boolean {
   return (
     hostname === "localhost" ||
     hostname === "127.0.0.1" ||
