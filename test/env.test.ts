@@ -13,6 +13,7 @@ describe("environment configuration", () => {
       TWILIO_VALIDATE_SIGNATURES: true,
       OPENAI_REALTIME_MODEL: "gpt-realtime-2.1",
       VOICE_INSTRUCTIONS: "You are a helpful voice assistant.",
+      BACKEND_AGENT_TIMEOUT_MS: 8_000,
       MAX_JSON_MESSAGE_BYTES: 65_536,
       MAX_AUDIO_FRAME_BYTES: 262_144,
       IDLE_SESSION_TIMEOUT_MS: 60_000,

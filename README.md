@@ -25,6 +25,8 @@ Twilio incoming call
   │  signed Media Stream WebSocket
   ▼
 Twilio adapter ──► VoiceSessionManager
+                        ├── one BackendAgent per call
+                        └── RealtimeProvider
 ```
 
 The domain and application layers do not import OpenAI types, WebSocket types,
@@ -37,8 +39,12 @@ session are processed sequentially, and sessions have independent provider
 connections, listeners, state, and buffered audio. The session manager can
 close all active provider connections during application shutdown.
 
-There is no order, cart, payment, inventory, or other business-backend
-integration in this repository.
+For Twilio calls, the realtime model is a receptionist rather than a business
+authority. It may handle only greetings, thanks, goodbyes, simple pleasantries,
+and repeat requests. Every other request is sent through the single
+`delegate_to_backend` tool to an isolated `BackendAgent`. The concrete business
+orchestrator remains external to this repository and is connected through an
+HTTP adapter.
 
 ## Directory structure
 
@@ -48,6 +54,8 @@ public/
   app.js                             # WebSocket, microphone, and audio playback
 src/
   adapters/
+    backend/
+      httpBackendAgent.ts            # Existing orchestrator HTTP adapter
     realtime/
       mockRealtimeProvider.ts        # Credential-free deterministic test provider
       openaiRealtimeProvider.ts      # OpenAI Realtime protocol adapter
@@ -61,6 +69,7 @@ src/
     websocket/
       voiceWebsocketRoute.ts         # Validated public WebSocket protocol
   application/
+    voiceReceptionist.ts             # Receptionist scope and delegation prompt
     voiceSessionManager.ts           # Session orchestration and isolation
   config/
     env.ts                           # Environment parsing and validation
@@ -68,6 +77,7 @@ src/
     voiceEvents.ts                   # Client message schema and domain events
     voiceSession.ts                  # Voice session model
   ports/
+    backendAgent.ts                  # Business orchestrator contract
     realtimeProvider.ts              # Provider-neutral realtime contract
     sessionStore.ts                  # Storage contract
   shared/
@@ -91,11 +101,14 @@ Copy `.env.example` to `.env`. The local `.env` file is ignored by Git.
 | `REALTIME_PROVIDER` | `mock` | `mock` or `openai` |
 | `OPENAI_API_KEY` | unset | Server-only OpenAI credential; required for `openai` |
 | `OPENAI_REALTIME_MODEL` | `gpt-realtime-2.1` | OpenAI Realtime model name |
+| `BACKEND_AGENT_URL` | unset | Existing orchestrator's JSON chat endpoint |
+| `BACKEND_AGENT_AUTHORIZATION` | unset | Optional complete `Authorization` header value |
+| `BACKEND_AGENT_TIMEOUT_MS` | `8000` | Maximum wait for an orchestrator response |
 | `TWILIO_ENABLED` | `false` | Register the Twilio webhook and Media Stream routes |
 | `TWILIO_AUTH_TOKEN` | unset | Server-only secret used to validate Twilio signatures |
 | `PUBLIC_BASE_URL` | unset | Configured public HTTPS origin used for Twilio signatures and TwiML |
 | `TWILIO_VALIDATE_SIGNATURES` | `true` | Validate Twilio webhook and WebSocket signatures |
-| `VOICE_INSTRUCTIONS` | `You are a helpful voice assistant.` | Base instructions applied to every session |
+| `VOICE_INSTRUCTIONS` | `You are a helpful voice assistant.` | Context prepended to the enforced Twilio receptionist instructions |
 | `MAX_JSON_MESSAGE_BYTES` | `65536` | Maximum incoming JSON frame size |
 | `MAX_AUDIO_FRAME_BYTES` | `262144` | Maximum incoming binary audio-frame size |
 | `IDLE_SESSION_TIMEOUT_MS` | `60000` | Close a connection with no client frames |
@@ -107,7 +120,8 @@ Copy `.env.example` to `.env`. The local `.env` file is ignored by Git.
 Environment values are validated at startup. Provider credentials are used only
 by server-side adapters and are never included in browser assets or public
 protocol messages. Default logs redact OpenAI and Twilio secrets plus common
-authorization fields; raw audio and full provider payloads are not logged.
+authorization fields; raw audio, caller requests, and full provider payloads
+are not logged.
 
 ## Local startup
 
@@ -248,13 +262,15 @@ Fastify ──► TwiML <Response><Connect><Stream>
 Twilio media adapter
   │  raw G.711 μ-law/8 kHz audio
   ▼
-VoiceSessionManager ──► RealtimeProvider ──► OpenAI Realtime
+VoiceSessionManager ──┬─► RealtimeProvider ──► OpenAI Realtime
+                      └─► BackendAgent ──► existing orchestrator
 ```
 
 The webhook and Media Stream upgrade have independent Twilio signature checks.
-Each `start` event creates one isolated voice session and one realtime-provider
-connection. A Twilio `stop`, WebSocket disconnect, provider failure, timeout,
-or application shutdown closes that provider connection exactly once.
+Each `start` event creates one isolated voice session, one realtime-provider
+connection, and one backend-agent instance. A Twilio `stop`, WebSocket
+disconnect, provider failure, timeout, or application shutdown closes those
+per-call resources exactly once.
 
 ### Environment configuration
 
@@ -269,9 +285,12 @@ The Twilio-related variables are:
 | `REALTIME_PROVIDER` | Use `openai` for a conversational phone call |
 | `OPENAI_API_KEY` | Server-only key required when the provider is `openai` |
 | `OPENAI_REALTIME_MODEL` | Realtime model selected for the provider connection |
+| `BACKEND_AGENT_URL` | Existing orchestrator endpoint accepting the contract below |
+| `BACKEND_AGENT_AUTHORIZATION` | Optional complete authorization header, such as `Bearer ...` |
+| `BACKEND_AGENT_TIMEOUT_MS` | Delegation deadline before a short apology is returned |
 
-Neither Twilio nor OpenAI credentials are sent to `public/` or included in
-WebSocket messages. Do not put the ngrok authtoken in this application's
+Twilio, OpenAI, and backend credentials are not sent to `public/` or included
+in WebSocket messages. Do not put the ngrok authtoken in this application's
 `.env`; keep it in ngrok's own configuration.
 
 ### Incoming-call and Twilio Console setup
@@ -285,7 +304,7 @@ WebSocket messages. Do not put the ngrok authtoken in this application's
    Twilio project as the phone number. Test credentials and API-key secrets do
    not validate inbound webhook signatures.
 5. Set `TWILIO_ENABLED=true`, `TWILIO_VALIDATE_SIGNATURES=true`,
-   `REALTIME_PROVIDER=openai`, and `OPENAI_API_KEY`.
+   `REALTIME_PROVIDER=openai`, `OPENAI_API_KEY`, and `BACKEND_AGENT_URL`.
 6. In Twilio Console, open **Phone Numbers → Manage → Active numbers**, select
    the number, and find its incoming Voice configuration.
 7. For **A call comes in**, select **Webhook**, enter
@@ -329,6 +348,8 @@ PUBLIC_BASE_URL=https://your-current-ngrok-domain.ngrok.app
 TWILIO_VALIDATE_SIGNATURES=true
 REALTIME_PROVIDER=openai
 OPENAI_API_KEY=your-server-only-openai-key
+BACKEND_AGENT_URL=https://backend.example.com/chat
+BACKEND_AGENT_AUTHORIZATION=Bearer your-server-only-backend-token
 ```
 
 ```sh
@@ -369,11 +390,49 @@ before assuming a Console or carrier failure is an application bug.
 6. Inbound `dtmf` and returned `mark` events are validated and sequenced but do
    not currently invoke business logic.
 7. Twilio `stop` or WebSocket close ends the voice session and closes its
-   OpenAI connection.
+   OpenAI connection and backend-agent instance.
 
 Twilio event schemas, stream SIDs, sequence numbers, ordering, frame size,
 backpressure, idle timeout, maximum duration, and heartbeat state are all
 validated or bounded.
+
+### Receptionist and backend delegation
+
+The realtime model receives exactly one domain function:
+`delegate_to_backend(user_message)`. Its instructions allow direct replies only
+for greetings, thanks, goodbyes, simple pleasantries, and repeat requests.
+Mixed requests such as “Hi, do you have beef pho?” must delegate the complete
+request.
+
+Each function `call_id` is recorded before execution, so a duplicated provider
+event cannot execute the backend operation twice. The backend result is sent
+back as `function_call_output`, after which the realtime model is asked to
+speak it faithfully. A backend error, empty response, or timeout produces a
+short caller-facing apology.
+
+`BACKEND_AGENT_URL` receives:
+
+```json
+{
+  "message": "Do you have beef pho?",
+  "sessionId": "per-call-voice-session-id",
+  "callSid": "CA..."
+}
+```
+
+It must return:
+
+```json
+{
+  "response": "Yes, beef pho is available."
+}
+```
+
+The application creates a new `BackendAgent` for every call and includes a
+unique `sessionId`, allowing the existing orchestrator to keep conversation
+history isolated. `streamSid` is retained locally for lifecycle and structured
+latency/error logs but is not sent in the HTTP body. Caller messages are never
+included in those logs.
 
 ### Audio-format differences
 
@@ -489,6 +548,8 @@ provider-specific event payloads.
 - `SIGINT` and `SIGTERM` close Fastify and all active realtime connections.
 - Session lifecycle and failures use structured logs with `sessionId` where one
   has been allocated.
+- Delegation logs include `sessionId`, `callSid`, `streamSid`, tool name,
+  latency, and errors without recording the caller's request.
 
 ## Known limitations
 
@@ -510,7 +571,8 @@ provider-specific event payloads.
   changes may require adapter updates.
 - Twilio deployment requires a stable public HTTPS/WSS origin and does not
   currently expose call-status callbacks, recording, or DTMF application logic.
-- There is no order/backend integration or tool-calling workflow.
+- The business orchestrator is not implemented here; `BACKEND_AGENT_URL` must
+  point to the existing orchestrator service.
 
 ## Future integration points
 
@@ -522,8 +584,6 @@ provider-specific event payloads.
 - Replace browser audio processing with an `AudioWorklet`.
 - Add server-side audio validation/transcoding and automatic voice activity
   detection.
-- Introduce business tools—such as a future ordering backend—through a separate
-  application port and adapter. No such integration exists today.
 
 ## Commands
 

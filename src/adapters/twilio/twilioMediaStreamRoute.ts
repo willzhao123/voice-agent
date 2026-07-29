@@ -9,6 +9,7 @@ import type {
   VoiceSessionEvent,
   VoiceSessionManager,
 } from "../../application/voiceSessionManager.js";
+import { createVoiceReceptionistInstructions } from "../../application/voiceReceptionist.js";
 import {
   createTwilioClearMessage,
   createTwilioMarkMessage,
@@ -295,13 +296,17 @@ export function registerTwilioMediaStreamRoute(
         callSid = message.start.callSid;
         const session = await sessionManager.createSession(
           onSessionEvent,
-          options.instructions,
+          createVoiceReceptionistInstructions(options.instructions),
           {
             audioFormat: {
               encoding: "g711_ulaw",
               sampleRate: 8_000,
             },
             turnDetection: "server_vad",
+            backendContext: {
+              callSid,
+              streamSid,
+            },
           },
         );
         sessionId = session.id;

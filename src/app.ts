@@ -8,6 +8,7 @@ import Fastify, {
 import { resolve } from "node:path";
 
 import { VoiceSessionManager } from "./application/voiceSessionManager.js";
+import { HttpBackendAgentFactory } from "./adapters/backend/httpBackendAgent.js";
 import { MockRealtimeProvider } from "./adapters/realtime/mockRealtimeProvider.js";
 import { OpenAIRealtimeProvider } from "./adapters/realtime/openaiRealtimeProvider.js";
 import { MemorySessionStore } from "./adapters/storage/memorySessionStore.js";
@@ -29,6 +30,7 @@ import {
   isLoopbackHostname,
 } from "./config/env.js";
 import type { RealtimeProvider } from "./ports/realtimeProvider.js";
+import type { BackendAgentFactory } from "./ports/backendAgent.js";
 import type { SessionStore } from "./ports/sessionStore.js";
 import {
   createLoggerOptions,
@@ -39,6 +41,7 @@ export interface AppDependencies {
   logger?: Logger;
   loggerInstance?: FastifyBaseLogger;
   realtimeProvider?: RealtimeProvider;
+  backendAgentFactory?: BackendAgentFactory;
   sessionStore?: SessionStore;
   voiceWebsocketOptions?: Partial<VoiceWebsocketOptions>;
   twilioEnabled?: boolean;
@@ -86,11 +89,26 @@ export async function buildApp(
       });
   const logger = dependencies.logger ?? app.log;
   const provider = dependencies.realtimeProvider ?? createRealtimeProvider();
+  const backendAgentFactory =
+    dependencies.backendAgentFactory ??
+    (env.BACKEND_AGENT_URL === undefined
+      ? undefined
+      : new HttpBackendAgentFactory({
+          url: env.BACKEND_AGENT_URL,
+          ...(env.BACKEND_AGENT_AUTHORIZATION === undefined
+            ? {}
+            : {
+                authorization: env.BACKEND_AGENT_AUTHORIZATION,
+              }),
+        }));
   const sessionStore = dependencies.sessionStore ?? new MemorySessionStore();
   const sessionManager = new VoiceSessionManager(
     provider,
     sessionStore,
     logger,
+    undefined,
+    backendAgentFactory,
+    env.BACKEND_AGENT_TIMEOUT_MS,
   );
   const twilioSignatureValidator =
     dependencies.twilioSignatureValidator ??

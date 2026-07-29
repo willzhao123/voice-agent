@@ -14,6 +14,9 @@ import {
 
 const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime";
 const DEFAULT_SESSION_READY_TIMEOUT_MS = 10_000;
+const DELEGATE_TOOL_NAME = "delegate_to_backend";
+const INVALID_DELEGATION_MESSAGE =
+  "I'm sorry, I couldn't process that request. Please try again.";
 
 export interface OpenAIRealtimeSocket {
   open(): Promise<void>;
@@ -74,6 +77,8 @@ export class OpenAIRealtimeProvider implements RealtimeProvider {
     let closing = false;
     let inputAudioStarted = false;
     let readySettled = false;
+    const handledToolCallIds = new Set<string>();
+    let toolCallChain = Promise.resolve();
     let resolveReady = (): void => {};
     let rejectReady: (error: Error) => void = () => {};
     const readyPromise = new Promise<void>((resolve, reject) => {
@@ -119,6 +124,43 @@ export class OpenAIRealtimeProvider implements RealtimeProvider {
         const normalizedEvent = normalizeProviderEvent(providerEvent);
         if (normalizedEvent !== undefined) {
           emit(normalizedEvent);
+        }
+
+        if (
+          providerEvent.type === "response.done" &&
+          options.delegateToBackend !== undefined
+        ) {
+          const toolCalls = readFunctionCalls(providerEvent);
+          for (const toolCall of toolCalls) {
+            if (handledToolCallIds.has(toolCall.callId)) {
+              continue;
+            }
+            handledToolCallIds.add(toolCall.callId);
+            toolCallChain = toolCallChain
+              .then(async () => {
+                const output = await executeDelegation(
+                  toolCall,
+                  options.delegateToBackend!,
+                );
+                sendProviderEvent({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "function_call_output",
+                    call_id: toolCall.callId,
+                    output: JSON.stringify({ response: output }),
+                  },
+                });
+                sendProviderEvent({ type: "response.create" });
+              })
+              .catch(() => {
+                emit({
+                  type: "error",
+                  code: "backend_delegation_failed",
+                  message: "Failed to return the backend result",
+                  recoverable: true,
+                });
+              });
+          }
         }
 
         if (
@@ -324,6 +366,12 @@ function createSessionUpdateEvent(
       ...(options.instructions === undefined
         ? {}
         : { instructions: options.instructions }),
+      ...(options.delegateToBackend === undefined
+        ? {}
+        : {
+            tools: [createDelegateTool()],
+            tool_choice: "auto",
+          }),
       audio: {
         input: {
           format: toOpenAIAudioFormat(audioFormat),
@@ -345,6 +393,76 @@ function createSessionUpdateEvent(
       },
     },
   };
+}
+
+function createDelegateTool(): object {
+  return {
+    type: "function",
+    name: DELEGATE_TOOL_NAME,
+    description:
+      "Delegate every request other than greetings, thanks, goodbyes, simple pleasantries, or requests to repeat.",
+    parameters: {
+      type: "object",
+      properties: {
+        user_message: {
+          type: "string",
+          description: "The caller's complete request",
+        },
+      },
+      required: ["user_message"],
+      additionalProperties: false,
+    },
+  };
+}
+
+interface DelegationToolCall {
+  callId: string;
+  name: string;
+  arguments: string;
+}
+
+function readFunctionCalls(event: ProviderEvent): DelegationToolCall[] {
+  const response = requireRecord(event, "response");
+  const output = response.output;
+  if (!Array.isArray(output)) {
+    return [];
+  }
+
+  const calls: DelegationToolCall[] = [];
+  for (const item of output) {
+    if (!isRecord(item) || item.type !== "function_call") {
+      continue;
+    }
+    calls.push({
+      callId: requireString(item, "call_id"),
+      name: requireString(item, "name"),
+      arguments: requireString(item, "arguments"),
+    });
+  }
+  return calls;
+}
+
+async function executeDelegation(
+  toolCall: DelegationToolCall,
+  delegateToBackend: (userMessage: string) => Promise<string>,
+): Promise<string> {
+  if (toolCall.name !== DELEGATE_TOOL_NAME) {
+    return INVALID_DELEGATION_MESSAGE;
+  }
+
+  try {
+    const value: unknown = JSON.parse(toolCall.arguments);
+    if (
+      !isRecord(value) ||
+      typeof value.user_message !== "string" ||
+      value.user_message.trim() === ""
+    ) {
+      return INVALID_DELEGATION_MESSAGE;
+    }
+    return await delegateToBackend(value.user_message);
+  } catch {
+    return INVALID_DELEGATION_MESSAGE;
+  }
 }
 
 function toOpenAIAudioFormat(

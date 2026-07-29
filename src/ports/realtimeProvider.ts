@@ -15,6 +15,9 @@ export interface RealtimeSessionOptions {
   readonly instructions?: string;
   readonly audioFormat?: RealtimeAudioFormat;
   readonly turnDetection?: "manual" | "server_vad";
+  readonly delegateToBackend?: (
+    userMessage: string,
+  ) => Promise<string>;
 }
 
 export type RealtimeProviderEvent =

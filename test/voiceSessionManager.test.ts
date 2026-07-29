@@ -3,9 +3,19 @@ import { describe, expect, it } from "vitest";
 import { MockRealtimeProvider } from "../src/adapters/realtime/mockRealtimeProvider.js";
 import { MemorySessionStore } from "../src/adapters/storage/memorySessionStore.js";
 import {
+  BACKEND_FAILURE_MESSAGE,
   VoiceSessionManager,
   type VoiceSessionEvent,
 } from "../src/application/voiceSessionManager.js";
+import type {
+  BackendAgent,
+  BackendAgentContext,
+  BackendAgentFactory,
+} from "../src/ports/backendAgent.js";
+import type {
+  RealtimeProvider,
+  RealtimeSessionOptions,
+} from "../src/ports/realtimeProvider.js";
 import {
   SessionClosedError,
   SessionNotFoundError,
@@ -13,6 +23,50 @@ import {
 import { createLogger } from "../src/shared/logger.js";
 
 const silentLogger = createLogger("silent");
+
+class CapturingProvider implements RealtimeProvider {
+  readonly options: RealtimeSessionOptions[] = [];
+
+  async initialize(): Promise<void> {}
+
+  async openSession(
+    options: RealtimeSessionOptions,
+  ) {
+    this.options.push(options);
+    return {
+      async sendInputAudio() {},
+      async commitInputAudio() {},
+      async sendText() {},
+      async interrupt() {},
+      async close() {},
+    };
+  }
+}
+
+class TrackingBackendFactory implements BackendAgentFactory {
+  readonly contexts: BackendAgentContext[] = [];
+  readonly agents: Array<BackendAgent & {
+    messages: string[];
+    closeCount: number;
+  }> = [];
+
+  create(context: BackendAgentContext) {
+    this.contexts.push(context);
+    const agent = {
+      messages: [] as string[],
+      closeCount: 0,
+      async chat(message: string) {
+        this.messages.push(message);
+        return `${context.callSid}: ${message}`;
+      },
+      async close() {
+        this.closeCount += 1;
+      },
+    };
+    this.agents.push(agent);
+    return agent;
+  }
+}
 
 describe("VoiceSessionManager", () => {
   it("keeps two sessions and their provider events independent", async () => {
@@ -128,5 +182,86 @@ describe("VoiceSessionManager", () => {
     await expect(
       manager.interrupt("unknown-session"),
     ).rejects.toThrow("Voice session unknown-session was not found");
+  });
+
+  it("creates, delegates through, and closes one backend agent per call", async () => {
+    const provider = new CapturingProvider();
+    const backendFactory = new TrackingBackendFactory();
+    const ids = ["session-a", "session-b"];
+    const manager = new VoiceSessionManager(
+      provider,
+      new MemorySessionStore(),
+      silentLogger,
+      () => ids.shift() ?? "unexpected",
+      backendFactory,
+    );
+
+    const first = await manager.createSession(undefined, undefined, {
+      backendContext: {
+        callSid: "CA-a",
+        streamSid: "MZ-a",
+      },
+    });
+    const second = await manager.createSession(undefined, undefined, {
+      backendContext: {
+        callSid: "CA-b",
+        streamSid: "MZ-b",
+      },
+    });
+
+    await expect(
+      provider.options[0]?.delegateToBackend?.("first request"),
+    ).resolves.toBe("CA-a: first request");
+    await expect(
+      provider.options[1]?.delegateToBackend?.("second request"),
+    ).resolves.toBe("CA-b: second request");
+
+    expect(backendFactory.contexts).toEqual([
+      {
+        sessionId: first.id,
+        callSid: "CA-a",
+        streamSid: "MZ-a",
+      },
+      {
+        sessionId: second.id,
+        callSid: "CA-b",
+        streamSid: "MZ-b",
+      },
+    ]);
+    expect(backendFactory.agents[0]?.messages).toEqual([
+      "first request",
+    ]);
+    expect(backendFactory.agents[1]?.messages).toEqual([
+      "second request",
+    ]);
+
+    await manager.closeSession(first.id);
+    await manager.closeSession(second.id);
+    expect(backendFactory.agents.map((agent) => agent.closeCount))
+      .toEqual([1, 1]);
+  });
+
+  it("returns a short apology when backend delegation times out", async () => {
+    const provider = new CapturingProvider();
+    const backendFactory: BackendAgentFactory = {
+      create: () => ({
+        chat: () => new Promise<string>(() => {}),
+      }),
+    };
+    const manager = new VoiceSessionManager(
+      provider,
+      new MemorySessionStore(),
+      silentLogger,
+      () => "timed-out-session",
+      backendFactory,
+      5,
+    );
+    await manager.createSession(undefined, undefined, {
+      backendContext: { callSid: "CA-timeout" },
+    });
+
+    await expect(
+      provider.options[0]?.delegateToBackend?.("menu question"),
+    ).resolves.toBe(BACKEND_FAILURE_MESSAGE);
   });
 });

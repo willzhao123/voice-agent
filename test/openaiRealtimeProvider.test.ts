@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   OpenAIRealtimeProvider,
@@ -113,6 +113,80 @@ function parseSentMessages(
 }
 
 describe("OpenAIRealtimeProvider", () => {
+  it("registers only the backend delegation tool and executes each call ID once", async () => {
+    const harness = createProviderHarness();
+    const delegate = vi.fn(async (message: string) =>
+      `Backend answer for: ${message}`
+    );
+    const session = await harness.provider.openSession(
+      {
+        sessionId: "delegating-session",
+        delegateToBackend: delegate,
+      },
+      () => {},
+    );
+
+    expect(parseSentMessages(harness.socket)[0]).toMatchObject({
+      type: "session.update",
+      session: {
+        tool_choice: "auto",
+        tools: [
+          {
+            type: "function",
+            name: "delegate_to_backend",
+            parameters: {
+              type: "object",
+              required: ["user_message"],
+              additionalProperties: false,
+            },
+          },
+        ],
+      },
+    });
+
+    const functionCallResponse = {
+      type: "response.done",
+      response: {
+        status: "completed",
+        output: [
+          {
+            type: "function_call",
+            name: "delegate_to_backend",
+            call_id: "call-1",
+            arguments: JSON.stringify({
+              user_message: "Hi, do you have beef pho?",
+            }),
+          },
+        ],
+      },
+    };
+    harness.socket.emitMessage(functionCallResponse);
+    harness.socket.emitMessage(functionCallResponse);
+
+    await waitFor(() => parseSentMessages(harness.socket).length === 3);
+
+    expect(delegate).toHaveBeenCalledTimes(1);
+    expect(delegate).toHaveBeenCalledWith(
+      "Hi, do you have beef pho?",
+    );
+    expect(parseSentMessages(harness.socket).slice(1)).toEqual([
+      {
+        type: "conversation.item.create",
+        item: {
+          type: "function_call_output",
+          call_id: "call-1",
+          output: JSON.stringify({
+            response:
+              "Backend answer for: Hi, do you have beef pho?",
+          }),
+        },
+      },
+      { type: "response.create" },
+    ]);
+
+    await session.close();
+  });
+
   it("configures G.711 μ-law audio and server VAD for telephony", async () => {
     const harness = createProviderHarness();
     const session = await harness.provider.openSession(
@@ -343,3 +417,16 @@ describe("OpenAIRealtimeProvider", () => {
     await session.close();
   });
 });
+
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 500,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error("Timed out waiting for condition");
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+}

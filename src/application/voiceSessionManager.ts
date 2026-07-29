@@ -7,6 +7,11 @@ import {
   type VoiceSession,
 } from "../domain/voiceSession.js";
 import type {
+  BackendAgent,
+  BackendAgentContext,
+  BackendAgentFactory,
+} from "../ports/backendAgent.js";
+import type {
   RealtimeAudioFormat,
   RealtimeProvider,
   RealtimeProviderEvent,
@@ -24,9 +29,13 @@ export type VoiceSessionEventListener = (event: VoiceSessionEvent) => void;
 
 interface ActiveSession {
   readonly realtimeSession: RealtimeSession;
+  readonly backendAgent?: BackendAgent;
   readonly listeners: Set<VoiceSessionEventListener>;
   closePromise: Promise<void> | undefined;
 }
+
+export const BACKEND_FAILURE_MESSAGE =
+  "I'm sorry, I can't access that information right now. Please try again in a moment.";
 
 export class VoiceSessionManager {
   private readonly activeSessions = new Map<string, ActiveSession>();
@@ -37,6 +46,8 @@ export class VoiceSessionManager {
     private readonly sessionStore: SessionStore,
     private readonly logger: Logger,
     private readonly createId: () => string = randomUUID,
+    private readonly backendAgentFactory?: BackendAgentFactory,
+    private readonly backendTimeoutMs = 8_000,
   ) {}
 
   async createSession(
@@ -45,32 +56,57 @@ export class VoiceSessionManager {
     mediaOptions: {
       audioFormat?: RealtimeAudioFormat;
       turnDetection?: "manual" | "server_vad";
+      backendContext?: Omit<BackendAgentContext, "sessionId">;
     } = {},
   ): Promise<VoiceSession> {
     const session = createVoiceSession(await this.createUniqueId());
+    const {
+      backendContext,
+      ...realtimeMediaOptions
+    } = mediaOptions;
     const listeners = new Set<VoiceSessionEventListener>();
     if (initialListener !== undefined) {
       listeners.add(initialListener);
     }
 
     await this.sessionStore.save(session);
+    let backendAgent: BackendAgent | undefined;
 
     try {
+      if (backendContext !== undefined) {
+        backendAgent = await this.backendAgentFactory?.create({
+          sessionId: session.id,
+          ...backendContext,
+        });
+      }
       const realtimeSession = await this.realtimeProvider.openSession(
         {
           sessionId: session.id,
           ...(instructions === undefined ? {} : { instructions }),
-          ...mediaOptions,
+          ...realtimeMediaOptions,
+          ...(backendContext === undefined
+            ? {}
+            : {
+                delegateToBackend: (userMessage: string) =>
+                  this.delegateToBackend(
+                    session.id,
+                    backendContext,
+                    backendAgent,
+                    userMessage,
+                  ),
+              }),
         },
         (event) => this.emit(session.id, event, listeners),
       );
 
       this.activeSessions.set(session.id, {
         realtimeSession,
+        ...(backendAgent === undefined ? {} : { backendAgent }),
         listeners,
         closePromise: undefined,
       });
     } catch (error) {
+      await backendAgent?.close?.().catch(() => {});
       listeners.clear();
       await this.sessionStore.delete(session.id);
       throw error;
@@ -208,6 +244,16 @@ export class VoiceSessionManager {
       );
     }
 
+    try {
+      await activeSession.backendAgent?.close?.();
+    } catch (error) {
+      closeError ??= error;
+      this.logger.error(
+        { err: error, sessionId: session.id },
+        "Failed to close backend agent",
+      );
+    }
+
     const closedSession = closeVoiceSession(session);
     try {
       await this.sessionStore.save(closedSession);
@@ -253,6 +299,84 @@ export class VoiceSessionManager {
           "Voice session listener failed",
         );
       }
+    }
+  }
+
+  private async delegateToBackend(
+    sessionId: string,
+    context: Omit<BackendAgentContext, "sessionId">,
+    backendAgent: BackendAgent | undefined,
+    userMessage: string,
+  ): Promise<string> {
+    const startedAt = Date.now();
+    const logContext = {
+      sessionId,
+      callSid: context.callSid,
+      streamSid: context.streamSid,
+      tool: "delegate_to_backend",
+    };
+
+    if (backendAgent === undefined) {
+      this.logger.error(
+        logContext,
+        "Backend delegation requested but no backend agent is configured",
+      );
+      return BACKEND_FAILURE_MESSAGE;
+    }
+
+    try {
+      const abortController = new AbortController();
+      const response = await withTimeout(
+        backendAgent.chat(userMessage, {
+          signal: abortController.signal,
+        }),
+        this.backendTimeoutMs,
+        abortController,
+      );
+      if (response.trim() === "") {
+        throw new Error("Backend agent returned an empty response");
+      }
+      this.logger.info(
+        {
+          ...logContext,
+          latencyMs: Date.now() - startedAt,
+        },
+        "Backend delegation completed",
+      );
+      return response;
+    } catch (error) {
+      this.logger.error(
+        {
+          err: error,
+          ...logContext,
+          latencyMs: Date.now() - startedAt,
+        },
+        "Backend delegation failed",
+      );
+      return BACKEND_FAILURE_MESSAGE;
+    }
+  }
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  abortController: AbortController,
+): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      abortController.abort();
+      reject(new Error("Backend agent request timed out"));
+    }, timeoutMs);
+    timeout.unref();
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
     }
   }
 }
