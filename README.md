@@ -91,8 +91,10 @@ Copy `.env.example` to `.env`. The local `.env` file is ignored by Git.
 | `REALTIME_PROVIDER` | `mock` | `mock` or `openai` |
 | `OPENAI_API_KEY` | unset | Server-only OpenAI credential; required for `openai` |
 | `OPENAI_REALTIME_MODEL` | `gpt-realtime-2.1` | OpenAI Realtime model name |
+| `TWILIO_ENABLED` | `false` | Register the Twilio webhook and Media Stream routes |
 | `TWILIO_AUTH_TOKEN` | unset | Server-only secret used to validate Twilio signatures |
-| `TWILIO_PUBLIC_BASE_URL` | unset | Public HTTPS origin Twilio uses for webhooks and Media Streams |
+| `PUBLIC_BASE_URL` | unset | Configured public HTTPS origin used for Twilio signatures and TwiML |
+| `TWILIO_VALIDATE_SIGNATURES` | `true` | Validate Twilio webhook and WebSocket signatures |
 | `VOICE_INSTRUCTIONS` | `You are a helpful voice assistant.` | Base instructions applied to every session |
 | `MAX_JSON_MESSAGE_BYTES` | `65536` | Maximum incoming JSON frame size |
 | `MAX_AUDIO_FRAME_BYTES` | `262144` | Maximum incoming binary audio-frame size |
@@ -229,14 +231,16 @@ scheduled for playback.
 Twilio support uses bidirectional Media Streams without changing the browser
 protocol:
 
-1. Configure a Twilio phone number's incoming-call webhook as
+1. Set `TWILIO_ENABLED=true`.
+2. Configure a Twilio phone number's incoming-call webhook as
    `POST https://your-public-host/v1/twilio/voice`.
-2. Set `TWILIO_AUTH_TOKEN` to that Twilio account's auth token.
-3. Set `TWILIO_PUBLIC_BASE_URL` to the externally visible HTTPS origin, such as
+3. Set `TWILIO_AUTH_TOKEN` to that Twilio account's auth token.
+4. Set `PUBLIC_BASE_URL` to the externally visible HTTPS origin, such as
    `https://voice.example.com`. This ensures signature validation uses the
    exact URL Twilio signed when the application is behind a proxy.
-4. Set `REALTIME_PROVIDER=openai` and configure `OPENAI_API_KEY`.
-5. Expose the application over HTTPS/WSS on public port 443.
+5. Leave `TWILIO_VALIDATE_SIGNATURES=true`.
+6. Set `REALTIME_PROVIDER=openai` and configure `OPENAI_API_KEY`.
+7. Expose the application over HTTPS/WSS on public port 443.
 
 The signed webhook returns TwiML containing:
 
@@ -259,6 +263,14 @@ session.
 
 Twilio webhook and WebSocket signatures are validated with the server-only auth
 token. Neither Twilio nor OpenAI credentials are exposed to the browser.
+The signed URLs are constructed only from `PUBLIC_BASE_URL` and fixed route
+paths; request host and forwarded headers are not trusted for signature
+validation or TwiML generation.
+
+`TWILIO_VALIDATE_SIGNATURES=false` is provided only for explicit local
+automated tests and is rejected unless `PUBLIC_BASE_URL` uses an HTTPS loopback
+host. `TWILIO_AUTH_TOKEN` and an HTTPS `PUBLIC_BASE_URL` remain required
+whenever Twilio is enabled.
 
 Twilio Media Streams require raw headerless `audio/x-mulaw` at 8 kHz. The
 OpenAI adapter selects `audio/pcmu` for both input and output, so this path does

@@ -9,6 +9,8 @@ describe("environment configuration", () => {
       PORT: 3000,
       LOG_LEVEL: "info",
       REALTIME_PROVIDER: "mock",
+      TWILIO_ENABLED: false,
+      TWILIO_VALIDATE_SIGNATURES: true,
       OPENAI_REALTIME_MODEL: "gpt-realtime-2.1",
       VOICE_INSTRUCTIONS: "You are a helpful voice assistant.",
       MAX_JSON_MESSAGE_BYTES: 65_536,
@@ -48,6 +50,55 @@ describe("environment configuration", () => {
       expect.not.objectContaining({
         message: expect.stringContaining(secret),
       }),
+    );
+  });
+
+  it("requires secure Twilio configuration when enabled", () => {
+    expect(() => parseEnvironment({
+      TWILIO_ENABLED: "true",
+    })).toThrow(
+      "TWILIO_AUTH_TOKEN: is required when TWILIO_ENABLED is true; " +
+        "PUBLIC_BASE_URL: is required when TWILIO_ENABLED is true",
+    );
+
+    expect(() => parseEnvironment({
+      TWILIO_ENABLED: "true",
+      TWILIO_AUTH_TOKEN: "test-token",
+      PUBLIC_BASE_URL: "http://voice.example.com",
+    })).toThrow(
+      "PUBLIC_BASE_URL: must be an HTTPS URL when TWILIO_ENABLED is true",
+    );
+
+    expect(parseEnvironment({
+      TWILIO_ENABLED: "true",
+      TWILIO_AUTH_TOKEN: "test-token",
+      PUBLIC_BASE_URL: "https://voice.example.com",
+    })).toMatchObject({
+      TWILIO_ENABLED: true,
+      TWILIO_AUTH_TOKEN: "test-token",
+      PUBLIC_BASE_URL: "https://voice.example.com",
+      TWILIO_VALIDATE_SIGNATURES: true,
+    });
+  });
+
+  it("requires an explicit false value to disable Twilio signatures", () => {
+    expect(parseEnvironment({
+      TWILIO_ENABLED: "true",
+      TWILIO_AUTH_TOKEN: "test-token",
+      PUBLIC_BASE_URL: "https://localhost",
+      TWILIO_VALIDATE_SIGNATURES: "false",
+    })).toMatchObject({
+      TWILIO_ENABLED: true,
+      TWILIO_VALIDATE_SIGNATURES: false,
+    });
+
+    expect(() => parseEnvironment({
+      TWILIO_ENABLED: "true",
+      TWILIO_AUTH_TOKEN: "test-token",
+      PUBLIC_BASE_URL: "https://voice.example.com",
+      TWILIO_VALIDATE_SIGNATURES: "false",
+    })).toThrow(
+      "TWILIO_VALIDATE_SIGNATURES: can be false only for local automated testing",
     );
   });
 });

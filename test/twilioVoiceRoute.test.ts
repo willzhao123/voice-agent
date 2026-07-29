@@ -37,8 +37,9 @@ describe("POST /v1/twilio/voice", () => {
     const app = await buildApp({
       logger: silentLogger,
       realtimeProvider: new MockRealtimeProvider(),
+      twilioEnabled: true,
       twilioSignatureValidator: validator,
-      twilioPublicBaseUrl: "https://voice.example.com",
+      publicBaseUrl: "https://voice.example.com",
     });
     apps.push(app);
 
@@ -48,12 +49,15 @@ describe("POST /v1/twilio/voice", () => {
       headers: {
         "content-type": "application/x-www-form-urlencoded",
         "x-twilio-signature": "test-signature",
+        host: "attacker.example",
+        "x-forwarded-host": "attacker.example",
+        "x-forwarded-proto": "http",
       },
       payload: "CallSid=CA123&From=%2B15551234567",
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.headers["content-type"]).toContain("text/xml");
+    expect(response.headers["content-type"]).toContain("application/xml");
     expect(response.body).toContain("<Connect>");
     expect(response.body).toContain(
       '<Stream url="wss://voice.example.com/v1/twilio/media"/>',
@@ -74,9 +78,10 @@ describe("POST /v1/twilio/voice", () => {
     const app = await buildApp({
       logger: silentLogger,
       realtimeProvider: new MockRealtimeProvider(),
+      twilioEnabled: true,
       twilioSignatureValidator:
         new RecordingSignatureValidator(false),
-      twilioPublicBaseUrl: "https://voice.example.com",
+      publicBaseUrl: "https://voice.example.com",
     });
     apps.push(app);
 
@@ -91,5 +96,49 @@ describe("POST /v1/twilio/voice", () => {
     });
 
     expect(response.statusCode).toBe(403);
+  });
+
+  it("allows an explicit signature bypass for local automated tests", async () => {
+    const validator = new RecordingSignatureValidator(false);
+    const app = await buildApp({
+      logger: silentLogger,
+      realtimeProvider: new MockRealtimeProvider(),
+      twilioEnabled: true,
+      twilioValidateSignatures: false,
+      twilioSignatureValidator: validator,
+      publicBaseUrl: "https://localhost",
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/twilio/voice",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      payload: "CallSid=CA-test",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(validator.inputs).toEqual([]);
+  });
+
+  it("does not register the webhook when Twilio is disabled", async () => {
+    const app = await buildApp({
+      logger: silentLogger,
+      realtimeProvider: new MockRealtimeProvider(),
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/twilio/voice",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      payload: "CallSid=CA-test",
+    });
+
+    expect(response.statusCode).toBe(404);
   });
 });

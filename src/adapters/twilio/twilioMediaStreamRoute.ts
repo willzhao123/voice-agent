@@ -16,15 +16,19 @@ import {
   type TwilioInboundMessage,
 } from "./twilioMessages.js";
 import type { TwilioSignatureValidator } from "./twilioSignatureValidator.js";
-import { getPublicRequestUrl } from "./twilioVoiceRoute.js";
+import { getPublicRouteUrl } from "./twilioVoiceRoute.js";
 
 export interface TwilioMediaStreamRouteOptions {
   signatureValidator: TwilioSignatureValidator;
   instructions: string;
-  publicBaseUrl?: string;
+  publicBaseUrl: string;
+  validateSignatures: boolean;
   maxMessageBytes: number;
   maxPendingMessages: number;
   maxBufferedBytes: number;
+  idleTimeoutMs: number;
+  maxSessionDurationMs: number;
+  heartbeatIntervalMs: number;
 }
 
 export function registerTwilioMediaStreamRoute(
@@ -37,15 +41,17 @@ export function registerTwilioMediaStreamRoute(
     { websocket: true },
     (socket, request) => {
       const signatureUrl = getWebsocketRequestUrl(
-        request,
         options.publicBaseUrl,
       );
       if (
-        !options.signatureValidator.isConfigured() ||
-        !options.signatureValidator.validate({
-          signature: readSignature(request),
-          url: signatureUrl,
-        })
+        options.validateSignatures &&
+        (
+          !options.signatureValidator.isConfigured() ||
+          !options.signatureValidator.validate({
+            signature: readSignature(request),
+            url: signatureUrl,
+          })
+        )
       ) {
         app.log.warn(
           { path: request.url },
@@ -62,22 +68,44 @@ export function registerTwilioMediaStreamRoute(
       let pendingMessages = 0;
       let processing = Promise.resolve();
       let cleanupPromise: Promise<void> | undefined;
+      let state:
+        | "awaiting_connected"
+        | "awaiting_start"
+        | "streaming"
+        | "stopped" = "awaiting_connected";
+      let lastSequenceNumber = 0;
+      let isAlive = true;
+      let idleTimer: NodeJS.Timeout;
+
+      const clearConnectionTimers = (): void => {
+        clearTimeout(idleTimer);
+        clearTimeout(durationTimer);
+        clearInterval(heartbeatTimer);
+      };
 
       const cleanup = async (): Promise<void> => {
-        cleanupPromise ??= (async () => {
-          if (sessionId === undefined) {
-            return;
-          }
-          try {
-            await sessionManager.closeSession(sessionId);
-          } catch (error) {
-            app.log.error(
-              { err: error, sessionId, streamSid, callSid },
-              "Failed to close Twilio voice session",
-            );
-          }
-        })();
-        return cleanupPromise;
+        if (
+          cleanupPromise === undefined &&
+          sessionId !== undefined
+        ) {
+          const activeSessionId = sessionId;
+          cleanupPromise = (async () => {
+            try {
+              await sessionManager.closeSession(activeSessionId);
+            } catch (error) {
+              app.log.error(
+                {
+                  err: error,
+                  sessionId: activeSessionId,
+                  streamSid,
+                  callSid,
+                },
+                "Failed to close Twilio voice session",
+              );
+            }
+          })();
+        }
+        await cleanupPromise;
       };
 
       const close = (code: number, reason: string): void => {
@@ -85,10 +113,23 @@ export function registerTwilioMediaStreamRoute(
           return;
         }
         closing = true;
+        clearConnectionTimers();
         if (socket.readyState === WebSocket.OPEN) {
           socket.close(code, reason);
         }
         processing = processing.then(cleanup, cleanup);
+      };
+
+      const resetIdleTimer = (): void => {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          app.log.info(
+            { sessionId, streamSid, callSid },
+            "Twilio Media Stream idle timeout reached",
+          );
+          close(1000, "Idle timeout");
+        }, options.idleTimeoutMs);
+        idleTimer.unref();
       };
 
       const send = (message: object): void => {
@@ -188,6 +229,11 @@ export function registerTwilioMediaStreamRoute(
           },
         );
         sessionId = session.id;
+        state = "streaming";
+        if (closing) {
+          await cleanup();
+          return;
+        }
         app.log.info(
           { sessionId, streamSid, callSid },
           "Twilio Media Stream started",
@@ -197,16 +243,39 @@ export function registerTwilioMediaStreamRoute(
       const handleMessage = async (
         message: TwilioInboundMessage,
       ): Promise<void> => {
+        if (message.event !== "connected") {
+          const sequenceNumber = Number(message.sequenceNumber);
+          if (
+            !Number.isSafeInteger(sequenceNumber) ||
+            sequenceNumber <= lastSequenceNumber
+          ) {
+            throw new TwilioProtocolError(
+              "Twilio sequence number is duplicated or out of order",
+            );
+          }
+          lastSequenceNumber = sequenceNumber;
+        }
+
         switch (message.event) {
           case "connected":
-          case "mark":
-          case "dtmf":
+            if (state !== "awaiting_connected") {
+              throw new TwilioProtocolError(
+                "Twilio connected event is duplicated or out of order",
+              );
+            }
+            state = "awaiting_start";
             break;
           case "start":
+            if (state !== "awaiting_start") {
+              throw new TwilioProtocolError(
+                "Twilio start event is duplicated or out of order",
+              );
+            }
             await handleStart(message);
             break;
           case "media":
             if (
+              state !== "streaming" ||
               sessionId === undefined ||
               streamSid === undefined
             ) {
@@ -224,11 +293,33 @@ export function registerTwilioMediaStreamRoute(
               decodeBase64Audio(message.media.payload),
             );
             break;
+          case "mark":
+          case "dtmf":
+            if (
+              state !== "streaming" ||
+              streamSid === undefined
+            ) {
+              throw new TwilioProtocolError(
+                `Twilio ${message.event} arrived before start`,
+              );
+            }
+            if (message.streamSid !== streamSid) {
+              throw new TwilioProtocolError(
+                `Twilio ${message.event} stream SID does not match`,
+              );
+            }
+            break;
           case "stop":
             if (
-              streamSid !== undefined &&
-              message.streamSid !== streamSid
+              state !== "streaming" ||
+              sessionId === undefined ||
+              streamSid === undefined
             ) {
+              throw new TwilioProtocolError(
+                "Twilio stop arrived before start",
+              );
+            }
+            if (message.streamSid !== streamSid) {
               throw new TwilioProtocolError(
                 "Twilio stop stream SID does not match",
               );
@@ -237,10 +328,44 @@ export function registerTwilioMediaStreamRoute(
               { sessionId, streamSid, callSid },
               "Twilio Media Stream stopped",
             );
+            state = "stopped";
             close(1000, "Twilio stream stopped");
             break;
         }
       };
+
+      resetIdleTimer();
+      const durationTimer = setTimeout(() => {
+        app.log.info(
+          { sessionId, streamSid, callSid },
+          "Maximum Twilio Media Stream duration reached",
+        );
+        close(1000, "Maximum session duration");
+      }, options.maxSessionDurationMs);
+      durationTimer.unref();
+
+      const heartbeatTimer = setInterval(() => {
+        if (!isAlive) {
+          app.log.warn(
+            { sessionId, streamSid, callSid },
+            "Terminating unresponsive Twilio Media Stream",
+          );
+          closing = true;
+          clearConnectionTimers();
+          socket.terminate();
+          processing = processing.then(cleanup, cleanup);
+          return;
+        }
+        isAlive = false;
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.ping();
+        }
+      }, options.heartbeatIntervalMs);
+      heartbeatTimer.unref();
+
+      socket.on("pong", () => {
+        isAlive = true;
+      });
 
       socket.on("message", (data: RawData, isBinary: boolean) => {
         if (closing) {
@@ -261,6 +386,7 @@ export function registerTwilioMediaStreamRoute(
           return;
         }
 
+        resetIdleTimer();
         pendingMessages += 1;
         processing = processing
           .then(async () => {
@@ -286,6 +412,7 @@ export function registerTwilioMediaStreamRoute(
 
       socket.on("close", () => {
         closing = true;
+        clearConnectionTimers();
         processing = processing.then(cleanup, cleanup);
       });
     },
@@ -297,11 +424,12 @@ class TwilioProtocolError extends Error {
 }
 
 function getWebsocketRequestUrl(
-  request: FastifyRequest,
-  publicBaseUrl?: string,
+  publicBaseUrl: string,
 ): string {
-  const url = new URL(getPublicRequestUrl(request, publicBaseUrl));
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  const url = new URL(
+    getPublicRouteUrl(publicBaseUrl, "/v1/twilio/media"),
+  );
+  url.protocol = "wss:";
   return url.toString();
 }
 

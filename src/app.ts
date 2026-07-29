@@ -34,12 +34,19 @@ export interface AppDependencies {
   realtimeProvider?: RealtimeProvider;
   sessionStore?: SessionStore;
   voiceWebsocketOptions?: Partial<VoiceWebsocketOptions>;
+  twilioEnabled?: boolean;
+  twilioValidateSignatures?: boolean;
   twilioSignatureValidator?: TwilioSignatureValidator;
-  twilioPublicBaseUrl?: string;
+  publicBaseUrl?: string;
   twilioMediaStreamOptions?: Partial<
     Pick<
       TwilioMediaStreamRouteOptions,
-      "maxMessageBytes" | "maxPendingMessages" | "maxBufferedBytes"
+      | "maxMessageBytes"
+      | "maxPendingMessages"
+      | "maxBufferedBytes"
+      | "idleTimeoutMs"
+      | "maxSessionDurationMs"
+      | "heartbeatIntervalMs"
     >
   >;
 }
@@ -78,8 +85,14 @@ export async function buildApp(
     dependencies.twilioSignatureValidator ??
     new DefaultTwilioSignatureValidator(env.TWILIO_AUTH_TOKEN);
   const twilioPublicBaseUrl =
-    dependencies.twilioPublicBaseUrl ??
-    env.TWILIO_PUBLIC_BASE_URL;
+    dependencies.publicBaseUrl ??
+    env.PUBLIC_BASE_URL;
+  const twilioEnabled =
+    dependencies.twilioEnabled ??
+    env.TWILIO_ENABLED;
+  const twilioValidateSignatures =
+    dependencies.twilioValidateSignatures ??
+    env.TWILIO_VALIDATE_SIGNATURES;
 
   await app.register(websocket, {
     options: {
@@ -124,27 +137,35 @@ export async function buildApp(
       ...dependencies.voiceWebsocketOptions,
     },
   );
-  registerTwilioVoiceRoute(app, {
-    signatureValidator: twilioSignatureValidator,
-    ...(twilioPublicBaseUrl === undefined
-      ? {}
-      : { publicBaseUrl: twilioPublicBaseUrl }),
-  });
-  registerTwilioMediaStreamRoute(
-    app,
-    sessionManager,
-    {
+  if (twilioEnabled) {
+    if (twilioPublicBaseUrl === undefined) {
+      throw new Error(
+        "PUBLIC_BASE_URL is required when Twilio is enabled",
+      );
+    }
+    registerTwilioVoiceRoute(app, {
       signatureValidator: twilioSignatureValidator,
-      instructions: env.VOICE_INSTRUCTIONS,
-      maxMessageBytes: env.MAX_JSON_MESSAGE_BYTES,
-      maxPendingMessages: env.WEBSOCKET_MAX_PENDING_MESSAGES,
-      maxBufferedBytes: env.WEBSOCKET_MAX_BUFFERED_BYTES,
-      ...(twilioPublicBaseUrl === undefined
-        ? {}
-        : { publicBaseUrl: twilioPublicBaseUrl }),
-      ...dependencies.twilioMediaStreamOptions,
-    },
-  );
+      publicBaseUrl: twilioPublicBaseUrl,
+      validateSignatures: twilioValidateSignatures,
+    });
+    registerTwilioMediaStreamRoute(
+      app,
+      sessionManager,
+      {
+        signatureValidator: twilioSignatureValidator,
+        publicBaseUrl: twilioPublicBaseUrl,
+        validateSignatures: twilioValidateSignatures,
+        instructions: env.VOICE_INSTRUCTIONS,
+        maxMessageBytes: env.MAX_JSON_MESSAGE_BYTES,
+        maxPendingMessages: env.WEBSOCKET_MAX_PENDING_MESSAGES,
+        maxBufferedBytes: env.WEBSOCKET_MAX_BUFFERED_BYTES,
+        idleTimeoutMs: env.IDLE_SESSION_TIMEOUT_MS,
+        maxSessionDurationMs: env.MAX_SESSION_DURATION_MS,
+        heartbeatIntervalMs: env.WEBSOCKET_HEARTBEAT_INTERVAL_MS,
+        ...dependencies.twilioMediaStreamOptions,
+      },
+    );
+  }
 
   app.addHook("onClose", async () => {
     await sessionManager.closeAllSessions();

@@ -42,6 +42,7 @@ class MediaTrackingProvider implements RealtimeProvider {
   listener: RealtimeEventListener | undefined;
   readonly audio: Buffer[] = [];
   closeCalls = 0;
+  openCalls = 0;
 
   async initialize(): Promise<void> {}
 
@@ -49,6 +50,7 @@ class MediaTrackingProvider implements RealtimeProvider {
     options: RealtimeSessionOptions,
     listener: RealtimeEventListener,
   ): Promise<RealtimeSession> {
+    this.openCalls += 1;
     this.options = options;
     this.listener = listener;
     listener({
@@ -70,14 +72,26 @@ class MediaTrackingProvider implements RealtimeProvider {
   }
 }
 
-async function createHarness() {
+async function createHarness(
+  options: {
+    maxMessageBytes?: number;
+    idleTimeoutMs?: number;
+    maxSessionDurationMs?: number;
+    heartbeatIntervalMs?: number;
+  } = {},
+) {
   const provider = new MediaTrackingProvider();
   const validator = new AllowSignatureValidator();
   const app = await buildApp({
     logger: silentLogger,
     realtimeProvider: provider,
+    twilioEnabled: true,
     twilioSignatureValidator: validator,
-    twilioPublicBaseUrl: "https://voice.example.com",
+    publicBaseUrl: "https://voice.example.com",
+    twilioMediaStreamOptions: {
+      heartbeatIntervalMs: 10_000,
+      ...options,
+    },
   });
   apps.push(app);
   await app.ready();
@@ -102,6 +116,14 @@ async function createHarness() {
   );
 
   return { app, messages, provider, socket, validator };
+}
+
+function sendConnected(socket: WebSocket): void {
+  socket.send(JSON.stringify({
+    event: "connected",
+    protocol: "Call",
+    version: "1.0.0",
+  }));
 }
 
 function sendStart(socket: WebSocket): void {
@@ -145,12 +167,30 @@ describe("GET /v1/twilio/media", () => {
       socket,
       validator,
     } = await createHarness();
+    sendConnected(socket);
     sendStart(socket);
 
     const inboundAudio = Buffer.from([0xff, 0x7f, 0x00, 0x80]);
     socket.send(JSON.stringify({
-      event: "media",
+      event: "dtmf",
       sequenceNumber: "2",
+      streamSid: "MZ123",
+      dtmf: {
+        track: "inbound_track",
+        digit: "1",
+      },
+    }));
+    socket.send(JSON.stringify({
+      event: "mark",
+      sequenceNumber: "3",
+      streamSid: "MZ123",
+      mark: {
+        name: "assistant-audio-1",
+      },
+    }));
+    socket.send(JSON.stringify({
+      event: "media",
+      sequenceNumber: "4",
       streamSid: "MZ123",
       media: {
         track: "inbound",
@@ -192,7 +232,7 @@ describe("GET /v1/twilio/media", () => {
     const closePromise = once(socket, "close");
     socket.send(JSON.stringify({
       event: "stop",
-      sequenceNumber: "3",
+      sequenceNumber: "5",
       streamSid: "MZ123",
       stop: {
         accountSid: "AC123",
@@ -201,14 +241,121 @@ describe("GET /v1/twilio/media", () => {
     }));
     await closePromise;
     await waitFor(() => provider.closeCalls === 1);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(provider.closeCalls).toBe(1);
   });
 
   it("closes the provider session when Twilio disconnects", async () => {
     const { provider, socket } = await createHarness();
+    sendConnected(socket);
     sendStart(socket);
     await waitFor(() => provider.options !== undefined);
 
     socket.terminate();
+    await waitFor(() => provider.closeCalls === 1);
+  });
+
+  it("rejects media before start without creating a session", async () => {
+    const { provider, socket } = await createHarness();
+    sendConnected(socket);
+    const closePromise = once(socket, "close");
+    socket.send(JSON.stringify({
+      event: "media",
+      sequenceNumber: "1",
+      streamSid: "MZ123",
+      media: {
+        track: "inbound",
+        chunk: "1",
+        timestamp: "0",
+        payload: Buffer.from([0xff]).toString("base64"),
+      },
+    }));
+
+    const [code] = await closePromise;
+    expect(code).toBe(1008);
+    expect(provider.openCalls).toBe(0);
+    expect(provider.audio).toEqual([]);
+  });
+
+  it("rejects an invalid Twilio audio format", async () => {
+    const { provider, socket } = await createHarness();
+    sendConnected(socket);
+    const closePromise = once(socket, "close");
+    socket.send(JSON.stringify({
+      event: "start",
+      sequenceNumber: "1",
+      streamSid: "MZ123",
+      start: {
+        accountSid: "AC123",
+        streamSid: "MZ123",
+        callSid: "CA123",
+        tracks: ["inbound"],
+        mediaFormat: {
+          encoding: "audio/pcm",
+          sampleRate: 16_000,
+          channels: 2,
+        },
+      },
+    }));
+
+    const [code] = await closePromise;
+    expect(code).toBe(1008);
+    expect(provider.openCalls).toBe(0);
+  });
+
+  it("rejects duplicate start and closes its one session once", async () => {
+    const { provider, socket } = await createHarness();
+    sendConnected(socket);
+    sendStart(socket);
+    await waitFor(() => provider.openCalls === 1);
+
+    const closePromise = once(socket, "close");
+    socket.send(JSON.stringify({
+      event: "start",
+      sequenceNumber: "2",
+      streamSid: "MZ123",
+      start: {
+        accountSid: "AC123",
+        streamSid: "MZ123",
+        callSid: "CA123",
+        tracks: ["inbound"],
+        mediaFormat: {
+          encoding: "audio/x-mulaw",
+          sampleRate: 8_000,
+          channels: 1,
+        },
+      },
+    }));
+
+    const [code] = await closePromise;
+    expect(code).toBe(1008);
+    await waitFor(() => provider.closeCalls === 1);
+    expect(provider.openCalls).toBe(1);
+  });
+
+  it("rejects oversized messages", async () => {
+    const { provider, socket } = await createHarness({
+      maxMessageBytes: 16,
+    });
+    const closePromise = once(socket, "close");
+    sendConnected(socket);
+
+    const [code] = await closePromise;
+    expect(code).toBe(1009);
+    expect(provider.openCalls).toBe(0);
+  });
+
+  it("closes an idle session and its provider connection", async () => {
+    const { provider, socket } = await createHarness({
+      idleTimeoutMs: 30,
+      maxSessionDurationMs: 10_000,
+    });
+    sendConnected(socket);
+    sendStart(socket);
+    await waitFor(() => provider.openCalls === 1);
+    const closePromise = once(socket, "close");
+
+    await closePromise;
     await waitFor(() => provider.closeCalls === 1);
   });
 });

@@ -5,7 +5,8 @@ import type { TwilioSignatureValidator } from "./twilioSignatureValidator.js";
 
 export interface TwilioVoiceRouteOptions {
   signatureValidator: TwilioSignatureValidator;
-  publicBaseUrl?: string;
+  publicBaseUrl: string;
+  validateSignatures: boolean;
   mediaPath?: string;
 }
 
@@ -14,21 +15,21 @@ export function registerTwilioVoiceRoute(
   options: TwilioVoiceRouteOptions,
 ): void {
   app.post("/v1/twilio/voice", async (request, reply) => {
-    if (!options.signatureValidator.isConfigured()) {
-      return reply.code(503).send({
-        error: "Twilio voice integration is not configured",
-      });
-    }
-
-    const requestUrl = getPublicRequestUrl(
-      request,
+    const requestUrl = getPublicRouteUrl(
       options.publicBaseUrl,
+      "/v1/twilio/voice",
     );
-    if (!options.signatureValidator.validate({
-      signature: readHeader(request, "x-twilio-signature"),
-      url: requestUrl,
-      params: toSignatureParams(request.body),
-    })) {
+    if (
+      options.validateSignatures &&
+      (
+        !options.signatureValidator.isConfigured() ||
+        !options.signatureValidator.validate({
+          signature: readHeader(request, "x-twilio-signature"),
+          url: requestUrl,
+          params: toSignatureParams(request.body),
+        })
+      )
+    ) {
       return reply.code(403).send({
         error: "Invalid Twilio signature",
       });
@@ -45,19 +46,16 @@ export function registerTwilioVoiceRoute(
       });
 
     return reply
-      .type("text/xml; charset=utf-8")
+      .type("application/xml")
       .send(response.toString());
   });
 }
 
-export function getPublicRequestUrl(
-  request: FastifyRequest,
-  publicBaseUrl?: string,
+export function getPublicRouteUrl(
+  publicBaseUrl: string,
+  routePath: string,
 ): string {
-  const base = publicBaseUrl === undefined
-    ? `${request.protocol}://${request.host}`
-    : publicBaseUrl;
-  return new URL(request.raw.url ?? request.url, base).toString();
+  return new URL(routePath, publicBaseUrl).toString();
 }
 
 function getMediaStreamUrl(

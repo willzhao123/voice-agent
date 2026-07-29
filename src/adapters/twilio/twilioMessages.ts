@@ -2,13 +2,15 @@ import { z } from "zod";
 
 const twilioConnectedMessageSchema = z.object({
   event: z.literal("connected"),
-  protocol: z.string(),
-  version: z.string(),
+  protocol: z.literal("Call"),
+  version: z.literal("1.0.0"),
 }).passthrough();
+
+const sequenceNumberSchema = z.string().regex(/^\d+$/u);
 
 const twilioStartMessageSchema = z.object({
   event: z.literal("start"),
-  sequenceNumber: z.string(),
+  sequenceNumber: sequenceNumberSchema,
   streamSid: z.string().min(1),
   start: z.object({
     accountSid: z.string().min(1),
@@ -26,10 +28,10 @@ const twilioStartMessageSchema = z.object({
 
 const twilioMediaMessageSchema = z.object({
   event: z.literal("media"),
-  sequenceNumber: z.string(),
+  sequenceNumber: sequenceNumberSchema,
   streamSid: z.string().min(1),
   media: z.object({
-    track: z.string(),
+    track: z.literal("inbound"),
     chunk: z.string(),
     timestamp: z.string(),
     payload: z.string().min(1),
@@ -38,7 +40,7 @@ const twilioMediaMessageSchema = z.object({
 
 const twilioStopMessageSchema = z.object({
   event: z.literal("stop"),
-  sequenceNumber: z.string(),
+  sequenceNumber: sequenceNumberSchema,
   streamSid: z.string().min(1),
   stop: z.object({
     accountSid: z.string().min(1),
@@ -48,6 +50,7 @@ const twilioStopMessageSchema = z.object({
 
 const twilioMarkMessageSchema = z.object({
   event: z.literal("mark"),
+  sequenceNumber: sequenceNumberSchema,
   streamSid: z.string().min(1),
   mark: z.object({
     name: z.string(),
@@ -56,6 +59,7 @@ const twilioMarkMessageSchema = z.object({
 
 const twilioDtmfMessageSchema = z.object({
   event: z.literal("dtmf"),
+  sequenceNumber: sequenceNumberSchema,
   streamSid: z.string().min(1),
   dtmf: z.object({
     track: z.string(),
