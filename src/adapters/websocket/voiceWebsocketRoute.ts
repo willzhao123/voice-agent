@@ -7,6 +7,7 @@ import type {
   VoiceSessionEvent,
   VoiceSessionManager,
 } from "../../application/voiceSessionManager.js";
+import { createVoiceReceptionistInstructions } from "../../application/voiceReceptionist.js";
 import {
   parseClientVoiceMessage,
   type ClientVoiceMessage,
@@ -222,10 +223,13 @@ export function registerVoiceWebsocketRoute(
 
         const session = await sessionManager.createSession(
           forwardProviderEvent,
-          combineInstructions(
-            defaultInstructions,
-            message.instructions,
+          createVoiceReceptionistInstructions(
+            combineInstructions(
+              defaultInstructions,
+              message.instructions,
+            ),
           ),
+          { backendContext: {} },
         );
         sessionId = session.id;
         sendJson({
