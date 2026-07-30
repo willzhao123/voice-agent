@@ -120,6 +120,50 @@ describe("VoiceFaqRouter", () => {
   );
 
   it.each([
+    [
+      "Hello!",
+      "Hi! How can I help?",
+      "greeting",
+    ],
+    [
+      "Thank you.",
+      "You're welcome.",
+      "thanks",
+    ],
+    [
+      "Goodbye.",
+      "Goodbye!",
+      "goodbye",
+    ],
+  ])(
+    "handles lightweight social routing locally: %s",
+    (request, response, fallbackReason) => {
+      expect(router.route(request)).toEqual({
+        route: "local_social",
+        faqIds: [],
+        faqVersion: "test-v1",
+        fallbackReason,
+        localResponse: response,
+      });
+    },
+  );
+
+  it("repeats the last authoritative response without using the backend", () => {
+    expect(
+      router.route("Could you say that again?", {
+        lastAuthoritativeResponse:
+          "We're open from noon to 9 PM every day.",
+      }),
+    ).toEqual({
+      route: "local_social",
+      faqIds: [],
+      faqVersion: "test-v1",
+      fallbackReason: "repeat_request",
+      localResponse: "We're open from noon to 9 PM every day.",
+    });
+  });
+
+  it.each([
     "Do you have beef pho?",
     "How much is the combo pho?",
     "I want to place an order.",

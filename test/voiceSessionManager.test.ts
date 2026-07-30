@@ -415,11 +415,21 @@ describe("VoiceSessionManager", () => {
     await manager.createSession(undefined, undefined, {
       backendContext: {},
     });
+    const handleBusinessRequest =
+      provider.options[0]?.handleBusinessRequest;
+    expect(handleBusinessRequest).toBeDefined();
+    if (handleBusinessRequest === undefined) {
+      throw new Error("Business request handler was not configured");
+    }
 
     await expect(
-      provider.options[0]?.handleBusinessRequest?.(
-        "Is parking available?",
-      ),
+      handleBusinessRequest("Hello!"),
+    ).resolves.toBe("Hi! How can I help?");
+    await expect(
+      handleBusinessRequest("Is parking available?"),
+    ).resolves.toBe("We don't have parking.");
+    await expect(
+      handleBusinessRequest("Could you say that again?"),
     ).resolves.toBe("We don't have parking.");
   });
 });

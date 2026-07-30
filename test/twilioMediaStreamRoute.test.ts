@@ -441,7 +441,7 @@ describe("GET /v1/twilio/media", () => {
     expect(provider.options).toMatchObject({
       sessionId: expect.any(String),
       instructions: expect.stringContaining(
-        "call route_business_request",
+        "Route first and speak second",
       ),
       audioFormat: {
         encoding: "g711_ulaw",

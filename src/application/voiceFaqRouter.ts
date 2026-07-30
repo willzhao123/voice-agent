@@ -29,6 +29,7 @@ export type ApprovedFaqCatalog = z.infer<
 >;
 
 export type VoiceRequestRoute =
+  | "local_social"
   | "local_faq"
   | "backend"
   | "mixed"
@@ -41,6 +42,10 @@ export interface VoiceRequestDecision {
   readonly fallbackReason: string;
   readonly localResponse?: string;
   readonly backendRequest?: string;
+}
+
+export interface VoiceRoutingContext {
+  readonly lastAuthoritativeResponse?: string;
 }
 
 const DYNAMIC_REQUEST_PATTERNS = [
@@ -87,6 +92,10 @@ const CLAUSE_SEPARATOR =
 
 const FAQ_CLARIFICATION =
   "Are you asking about our hours, parking, reservations, or restaurant name?";
+const GREETING_RESPONSE = "Hi! How can I help?";
+const THANKS_RESPONSE = "You're welcome.";
+const GOODBYE_RESPONSE = "Goodbye!";
+const REPEAT_CLARIFICATION = "What would you like me to repeat?";
 
 export function parseApprovedFaqCatalog(
   value: unknown,
@@ -107,7 +116,19 @@ export class VoiceFaqRouter {
     return this.catalog.faqs.length;
   }
 
-  route(userMessage: string): VoiceRequestDecision {
+  route(
+    userMessage: string,
+    context: VoiceRoutingContext = {},
+  ): VoiceRequestDecision {
+    const socialDecision = routeLightweightSocialRequest(
+      userMessage,
+      context,
+      this.catalog.version,
+    );
+    if (socialDecision !== undefined) {
+      return socialDecision;
+    }
+
     const clauses = splitClauses(userMessage);
     const matchedEntries = new Map<
       string,
@@ -140,7 +161,7 @@ export class VoiceFaqRouter {
       const match = matches[0];
       if (match !== undefined) {
         matchedEntries.set(match.id, match);
-      } else if (!isGreetingOnly(clause)) {
+      } else if (!isLightweightSocialClause(clause)) {
         backendClauses.push(clause);
       }
     }
@@ -227,10 +248,73 @@ function isDynamicRequest(
   );
 }
 
-function isGreetingOnly(clause: string): boolean {
+function routeLightweightSocialRequest(
+  userMessage: string,
+  context: VoiceRoutingContext,
+  faqVersion: string,
+): VoiceRequestDecision | undefined {
+  const normalized = normalize(userMessage);
+  if (
+    /\b(?:repeat|say that again|say it again|what did you say)\b/u
+      .test(normalized)
+  ) {
+    return createSocialDecision(
+      context.lastAuthoritativeResponse ?? REPEAT_CLARIFICATION,
+      faqVersion,
+      "repeat_request",
+    );
+  }
+
+  if (!isLightweightSocialClause(normalized)) {
+    return undefined;
+  }
+  if (/\b(?:bye|goodbye|see you|good night)\b/u.test(normalized)) {
+    return createSocialDecision(
+      GOODBYE_RESPONSE,
+      faqVersion,
+      "goodbye",
+    );
+  }
+  if (
+    /\b(?:thanks|thank you|appreciate it)\b/u.test(normalized)
+  ) {
+    return createSocialDecision(
+      THANKS_RESPONSE,
+      faqVersion,
+      "thanks",
+    );
+  }
+  if (
+    /\b(?:hi|hello|hey|good morning|good afternoon|good evening)\b/u
+      .test(normalized)
+  ) {
+    return createSocialDecision(
+      GREETING_RESPONSE,
+      faqVersion,
+      "greeting",
+    );
+  }
+  return undefined;
+}
+
+function createSocialDecision(
+  localResponse: string,
+  faqVersion: string,
+  fallbackReason: string,
+): VoiceRequestDecision {
+  return {
+    route: "local_social",
+    faqIds: [],
+    faqVersion,
+    fallbackReason,
+    localResponse,
+  };
+}
+
+function isLightweightSocialClause(clause: string): boolean {
   const normalized = normalize(clause)
     .replace(
-      /\b(?:hi|hello|hey|please|thanks|thank you|good morning|good afternoon|good evening)\b/gu,
+      /\b(?:hi|hello|hey|please|thanks|thank you|appreciate it|bye|goodbye|see you|good night|good morning|good afternoon|good evening)\b/gu,
       "",
     )
     .replace(/\s+/gu, " ")

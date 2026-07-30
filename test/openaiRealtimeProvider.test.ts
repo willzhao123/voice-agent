@@ -129,7 +129,8 @@ describe("OpenAIRealtimeProvider", () => {
     expect(parseSentMessages(harness.socket)[0]).toMatchObject({
       type: "session.update",
       session: {
-        tool_choice: "auto",
+        output_modalities: ["text"],
+        tool_choice: "required",
         tools: [
           {
             type: "function",
@@ -147,6 +148,7 @@ describe("OpenAIRealtimeProvider", () => {
     const functionCallResponse = {
       type: "response.done",
       response: {
+        id: "routing-response-1",
         status: "completed",
         output: [
           {
@@ -169,20 +171,233 @@ describe("OpenAIRealtimeProvider", () => {
     expect(delegate).toHaveBeenCalledWith(
       "Hi, do you have beef pho?",
     );
-    expect(parseSentMessages(harness.socket).slice(1)).toEqual([
-      {
-        type: "conversation.item.create",
-        item: {
-          type: "function_call_output",
-          call_id: "call-1",
-          output: JSON.stringify({
-            response:
-              "Backend answer for: Hi, do you have beef pho?",
-          }),
+    expect(parseSentMessages(harness.socket)[1]).toEqual({
+      type: "conversation.item.create",
+      item: {
+        type: "function_call_output",
+        call_id: "call-1",
+        output: JSON.stringify({
+          response:
+            "Backend answer for: Hi, do you have beef pho?",
+        }),
+      },
+    });
+    expect(parseSentMessages(harness.socket)[2]).toMatchObject({
+      type: "response.create",
+      response: {
+        output_modalities: ["audio"],
+        instructions: expect.stringContaining(
+          "Speak only the authoritative function result",
+        ),
+        tools: [],
+        tool_choice: "none",
+        metadata: {
+          voice_stage: "final_speaking",
+          route_tool_call_id: "call-1",
         },
       },
-      { type: "response.create" },
+    });
+
+    await session.close();
+  });
+
+  it("suppresses routing-stage audio and emits exactly one final local-FAQ response", async () => {
+    const harness = createProviderHarness();
+    const events: RealtimeProviderEvent[] = [];
+    const route = vi.fn(async () =>
+      "We're open from noon to 9 PM every day."
+    );
+    const session = await harness.provider.openSession(
+      {
+        sessionId: "local-faq-routing-session",
+        handleBusinessRequest: route,
+      },
+      (event) => events.push(event),
+    );
+    events.length = 0;
+
+    harness.socket.emitMessage({
+      type: "response.created",
+      response: {
+        id: "routing-response",
+        metadata: { voice_stage: "routing" },
+      },
+    });
+    harness.socket.emitMessage({
+      type: "response.output_audio.delta",
+      response_id: "routing-response",
+      delta: Buffer.from("forbidden preamble").toString("base64"),
+    });
+    harness.socket.emitMessage({
+      type: "response.output_audio.done",
+      response_id: "routing-response",
+    });
+    harness.socket.emitMessage({
+      type: "response.done",
+      response: {
+        id: "routing-response",
+        status: "completed",
+        output: [
+          {
+            type: "function_call",
+            name: "route_business_request",
+            call_id: "local-faq-call",
+            arguments: JSON.stringify({
+              user_message: "What are your hours?",
+            }),
+          },
+        ],
+      },
+    });
+
+    await waitFor(() => parseSentMessages(harness.socket).length === 3);
+    expect(events).toEqual([]);
+    expect(route).toHaveBeenCalledOnce();
+
+    harness.socket.emitMessage({
+      type: "response.created",
+      response: {
+        id: "final-response",
+        metadata: { voice_stage: "final_speaking" },
+      },
+    });
+    harness.socket.emitMessage({
+      type: "response.output_audio_transcript.delta",
+      response_id: "final-response",
+      delta: "We're open from noon to 9 PM every day.",
+    });
+    const finalAudio = Buffer.from("authoritative final audio");
+    harness.socket.emitMessage({
+      type: "response.output_audio.delta",
+      response_id: "final-response",
+      delta: finalAudio.toString("base64"),
+    });
+    harness.socket.emitMessage({
+      type: "response.output_audio_transcript.done",
+      response_id: "final-response",
+      transcript: "We're open from noon to 9 PM every day.",
+    });
+    harness.socket.emitMessage({
+      type: "response.output_audio.done",
+      response_id: "final-response",
+    });
+    harness.socket.emitMessage({
+      type: "response.done",
+      response: {
+        id: "final-response",
+        status: "completed",
+        output: [],
+      },
+    });
+
+    expect(events).toEqual([
+      { type: "response.started" },
+      {
+        type: "transcript.agent.delta",
+        transcript: "We're open from noon to 9 PM every day.",
+      },
+      {
+        type: "output_audio.delta",
+        audio: finalAudio,
+      },
+      {
+        type: "transcript.agent.final",
+        transcript: "We're open from noon to 9 PM every day.",
+      },
+      { type: "output_audio.completed" },
+      { type: "response.completed" },
     ]);
+
+    await session.close();
+  });
+
+  it("emits no backend preamble and prevents the final response from routing again", async () => {
+    const harness = createProviderHarness();
+    const events: RealtimeProviderEvent[] = [];
+    let resolveBackend: (value: string) => void = () => {};
+    const backendResult = new Promise<string>((resolve) => {
+      resolveBackend = resolve;
+    });
+    const route = vi.fn(() => backendResult);
+    const session = await harness.provider.openSession(
+      {
+        sessionId: "backend-routing-session",
+        handleBusinessRequest: route,
+      },
+      (event) => events.push(event),
+    );
+    events.length = 0;
+
+    harness.socket.emitMessage({
+      type: "response.output_audio.delta",
+      response_id: "backend-routing-response",
+      delta: Buffer.from("premature answer").toString("base64"),
+    });
+    harness.socket.emitMessage({
+      type: "response.done",
+      response: {
+        id: "backend-routing-response",
+        status: "completed",
+        output: [
+          {
+            type: "function_call",
+            name: "route_business_request",
+            call_id: "backend-call",
+            arguments: JSON.stringify({
+              user_message: "Do you have beef pho?",
+            }),
+          },
+        ],
+      },
+    });
+
+    await waitFor(() => route.mock.calls.length === 1);
+    expect(events).toEqual([]);
+    expect(parseSentMessages(harness.socket)).toHaveLength(1);
+
+    resolveBackend("Yes, Combo Beef Pho is available.");
+    await waitFor(() => parseSentMessages(harness.socket).length === 3);
+    const finalCreate = parseSentMessages(harness.socket)[2];
+    expect(finalCreate).toMatchObject({
+      type: "response.create",
+      response: {
+        tools: [],
+        tool_choice: "none",
+        metadata: {
+          voice_stage: "final_speaking",
+          route_tool_call_id: "backend-call",
+        },
+      },
+    });
+
+    harness.socket.emitMessage({
+      type: "response.created",
+      response: {
+        id: "backend-final-response",
+        metadata: { voice_stage: "final_speaking" },
+      },
+    });
+    harness.socket.emitMessage({
+      type: "response.done",
+      response: {
+        id: "backend-final-response",
+        status: "completed",
+        output: [
+          {
+            type: "function_call",
+            name: "route_business_request",
+            call_id: "forbidden-second-call",
+            arguments: JSON.stringify({
+              user_message: "Route this again",
+            }),
+          },
+        ],
+      },
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    expect(route).toHaveBeenCalledOnce();
+    expect(parseSentMessages(harness.socket)).toHaveLength(3);
 
     await session.close();
   });

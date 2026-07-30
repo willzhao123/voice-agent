@@ -43,12 +43,13 @@ connections, listeners, state, and buffered audio. The session manager can
 close all active provider connections during application shutdown.
 
 For browser and Twilio calls, the realtime model is a receptionist rather than
-a business authority. It may handle only greetings, thanks, goodbyes, simple
-pleasantries, and repeat requests. Every substantive request is sent through
-the single `route_business_request` tool. The application answers
-high-confidence approved FAQs locally, asks for clarification on ambiguous FAQ
-matches, and sends dynamic or transactional work to an isolated
-`BackendAgent`. The concrete business orchestrator remains external.
+a business authority. Every turn must first call the single
+`route_business_request` tool without speaking. The application handles
+greetings and repeat requests, answers high-confidence approved FAQs locally,
+asks for clarification on ambiguous FAQ matches, and sends dynamic or
+transactional work to an isolated `BackendAgent`. Only a second, tool-disabled
+Realtime response may speak the authoritative result. The concrete business
+orchestrator remains external.
 
 ## Directory structure
 
@@ -408,10 +409,12 @@ validated or bounded.
 ### Receptionist, local FAQs, and backend delegation
 
 The realtime model receives exactly one domain function:
-`route_business_request(user_message)`. Its instructions allow direct replies
-only for greetings, thanks, goodbyes, simple pleasantries, and repeat requests.
-The complete substantive request is routed deterministically:
+`route_business_request(user_message)`. Session-level `tool_choice` is
+`required`, so every turn routes before any response is spoken. Greetings,
+thanks, goodbyes, and repeat requests are handled locally alongside the FAQ
+policy. The complete request is routed deterministically:
 
+- Lightweight social and repeat requests use controlled local responses.
 - High-confidence static FAQ matches use only `data/voice-faq.json`.
 - Ambiguous FAQ matches return a short clarification question.
 - Menu availability, prices, orders, payments, customer information, and other
@@ -421,9 +424,11 @@ The complete substantive request is routed deterministically:
 
 Each function `call_id` is recorded before execution, so a duplicated provider
 event cannot execute the backend operation twice. The backend result is sent
-back as `function_call_output`, after which the realtime model is asked to
-speak it faithfully. A backend error, empty response, or timeout produces a
-short caller-facing apology.
+back as `function_call_output`. Audio and assistant transcripts from the
+initial routing response are suppressed. The final `response.create` clears
+tools, sets `tool_choice` to `none`, and includes final-stage metadata; only
+that response's audio is forwarded. A backend error, empty response, or
+timeout produces a short caller-facing apology.
 
 `BACKEND_AGENT_URL` receives:
 

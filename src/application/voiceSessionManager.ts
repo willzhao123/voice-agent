@@ -44,6 +44,11 @@ interface LocalFaqHistoryTurn {
   readonly faqVersion: string;
 }
 
+interface VoiceConversationState {
+  readonly localFaqHistory: LocalFaqHistoryTurn[];
+  lastAuthoritativeResponse?: string;
+}
+
 export const BACKEND_FAILURE_MESSAGE =
   "I'm sorry, I can't access that information right now. Please try again in a moment.";
 
@@ -82,7 +87,9 @@ export class VoiceSessionManager {
 
     await this.sessionStore.save(session);
     let backendAgent: BackendAgent | undefined;
-    const localFaqHistory: LocalFaqHistoryTurn[] = [];
+    const conversationState: VoiceConversationState = {
+      localFaqHistory: [],
+    };
 
     try {
       if (backendContext !== undefined) {
@@ -104,7 +111,7 @@ export class VoiceSessionManager {
                     session.id,
                     backendContext,
                     backendAgent,
-                    localFaqHistory,
+                    conversationState,
                     userMessage,
                   ),
               }),
@@ -319,19 +326,29 @@ export class VoiceSessionManager {
     sessionId: string,
     context: Omit<BackendAgentContext, "sessionId">,
     backendAgent: BackendAgent | undefined,
-    localFaqHistory: LocalFaqHistoryTurn[],
+    conversationState: VoiceConversationState,
     userMessage: string,
   ): Promise<string> {
     const startedAt = Date.now();
-    const decision = this.faqRouter?.route(userMessage) ??
+    const decision = this.faqRouter?.route(userMessage, {
+      ...(conversationState.lastAuthoritativeResponse === undefined
+        ? {}
+        : {
+            lastAuthoritativeResponse:
+              conversationState.lastAuthoritativeResponse,
+          }),
+    }) ??
       createBackendOnlyDecision(userMessage);
     let response: string;
 
     switch (decision.route) {
+      case "local_social":
+        response = decision.localResponse ?? BACKEND_FAILURE_MESSAGE;
+        break;
       case "local_faq":
         response = decision.localResponse ?? BACKEND_FAILURE_MESSAGE;
         recordLocalFaqTurn(
-          localFaqHistory,
+          conversationState.localFaqHistory,
           response,
           decision,
         );
@@ -346,7 +363,7 @@ export class VoiceSessionManager {
           backendAgent,
           buildBackendRequest(
             decision.backendRequest ?? userMessage,
-            localFaqHistory,
+            conversationState.localFaqHistory,
           ),
         );
         break;
@@ -354,7 +371,7 @@ export class VoiceSessionManager {
         const localResponse =
           decision.localResponse ?? BACKEND_FAILURE_MESSAGE;
         recordLocalFaqTurn(
-          localFaqHistory,
+          conversationState.localFaqHistory,
           localResponse,
           decision,
         );
@@ -364,13 +381,14 @@ export class VoiceSessionManager {
           backendAgent,
           buildBackendRequest(
             decision.backendRequest ?? userMessage,
-            localFaqHistory,
+            conversationState.localFaqHistory,
           ),
         );
         response = `${localResponse} ${backendResponse}`;
         break;
       }
     }
+    conversationState.lastAuthoritativeResponse = response;
 
     this.logger.info(
       {

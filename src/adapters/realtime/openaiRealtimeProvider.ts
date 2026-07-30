@@ -15,6 +15,12 @@ import {
 const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime";
 const DEFAULT_SESSION_READY_TIMEOUT_MS = 10_000;
 const BUSINESS_ROUTER_TOOL_NAME = "route_business_request";
+const FINAL_SPEAKING_STAGE = "final_speaking";
+const FINAL_SPEAKING_INSTRUCTIONS = `
+Speak only the authoritative function result already present in the conversation.
+Do not add a preamble, acknowledgement, explanation, summary, or new facts.
+Do not call any tool. Keep the spoken response short and natural.
+`.trim();
 const INVALID_ROUTING_MESSAGE =
   "I'm sorry, I couldn't process that request. Please try again.";
 
@@ -77,7 +83,10 @@ export class OpenAIRealtimeProvider implements RealtimeProvider {
     let closing = false;
     let inputAudioStarted = false;
     let readySettled = false;
+    const strictRouting =
+      options.handleBusinessRequest !== undefined;
     const handledToolCallIds = new Set<string>();
+    const finalSpeakingResponseIds = new Set<string>();
     let toolCallChain = Promise.resolve();
     let resolveReady = (): void => {};
     let rejectReady: (error: Error) => void = () => {};
@@ -121,14 +130,39 @@ export class OpenAIRealtimeProvider implements RealtimeProvider {
           return;
         }
 
-        const normalizedEvent = normalizeProviderEvent(providerEvent);
-        if (normalizedEvent !== undefined) {
-          emit(normalizedEvent);
+        if (
+          strictRouting &&
+          providerEvent.type === "response.created"
+        ) {
+          const finalResponseId =
+            readFinalSpeakingResponseId(providerEvent);
+          if (finalResponseId !== undefined) {
+            finalSpeakingResponseIds.add(finalResponseId);
+          }
         }
 
         if (
+          shouldForwardProviderEvent(
+            providerEvent,
+            strictRouting,
+            finalSpeakingResponseIds,
+          )
+        ) {
+          const normalizedEvent =
+            normalizeProviderEvent(providerEvent);
+          if (normalizedEvent !== undefined) {
+            emit(normalizedEvent);
+          }
+        }
+
+        const responseId = readProviderResponseId(providerEvent);
+        const isFinalSpeakingResponse =
+          responseId !== undefined &&
+          finalSpeakingResponseIds.has(responseId);
+        if (
           providerEvent.type === "response.done" &&
-          options.handleBusinessRequest !== undefined
+          options.handleBusinessRequest !== undefined &&
+          !isFinalSpeakingResponse
         ) {
           const toolCalls = readFunctionCalls(providerEvent);
           for (const toolCall of toolCalls) {
@@ -150,7 +184,11 @@ export class OpenAIRealtimeProvider implements RealtimeProvider {
                     output: JSON.stringify({ response: output }),
                   },
                 });
-                sendProviderEvent({ type: "response.create" });
+                sendProviderEvent(
+                  createFinalSpeakingResponseEvent(
+                    toolCall.callId,
+                  ),
+                );
               })
               .catch(() => {
                 emit({
@@ -161,6 +199,14 @@ export class OpenAIRealtimeProvider implements RealtimeProvider {
                 });
               });
           }
+        }
+
+        if (
+          providerEvent.type === "response.done" &&
+          isFinalSpeakingResponse &&
+          responseId !== undefined
+        ) {
+          finalSpeakingResponseIds.delete(responseId);
         }
 
         if (
@@ -362,7 +408,10 @@ function createSessionUpdateEvent(
     type: "session.update",
     session: {
       type: "realtime",
-      output_modalities: ["audio"],
+      output_modalities:
+        options.handleBusinessRequest === undefined
+          ? ["audio"]
+          : ["text"],
       ...(options.instructions === undefined
         ? {}
         : { instructions: options.instructions }),
@@ -370,7 +419,7 @@ function createSessionUpdateEvent(
         ? {}
         : {
             tools: [createBusinessRouterTool()],
-            tool_choice: "auto",
+            tool_choice: "required",
           }),
       audio: {
         input: {
@@ -395,12 +444,30 @@ function createSessionUpdateEvent(
   };
 }
 
+function createFinalSpeakingResponseEvent(
+  routeToolCallId: string,
+): object {
+  return {
+    type: "response.create",
+    response: {
+      output_modalities: ["audio"],
+      instructions: FINAL_SPEAKING_INSTRUCTIONS,
+      tools: [],
+      tool_choice: "none",
+      metadata: {
+        voice_stage: FINAL_SPEAKING_STAGE,
+        route_tool_call_id: routeToolCallId,
+      },
+    },
+  };
+}
+
 function createBusinessRouterTool(): object {
   return {
     type: "function",
     name: BUSINESS_ROUTER_TOOL_NAME,
     description:
-      "Route every substantive restaurant request through approved local FAQs or the business backend. Always pass the caller's complete request, including mixed requests.",
+      "Route every caller request, including greetings and repeat requests, through approved local handling or the business backend. Always pass the caller's complete request.",
     parameters: {
       type: "object",
       properties: {
@@ -442,6 +509,50 @@ function readFunctionCalls(
     });
   }
   return calls;
+}
+
+function shouldForwardProviderEvent(
+  event: ProviderEvent,
+  strictRouting: boolean,
+  finalSpeakingResponseIds: ReadonlySet<string>,
+): boolean {
+  if (!strictRouting || !event.type.startsWith("response.")) {
+    return true;
+  }
+  const responseId = readProviderResponseId(event);
+  return responseId !== undefined &&
+    finalSpeakingResponseIds.has(responseId);
+}
+
+function readFinalSpeakingResponseId(
+  event: ProviderEvent,
+): string | undefined {
+  const response = event.response;
+  if (!isRecord(response)) {
+    return undefined;
+  }
+  const metadata = response.metadata;
+  if (
+    !isRecord(metadata) ||
+    metadata.voice_stage !== FINAL_SPEAKING_STAGE
+  ) {
+    return undefined;
+  }
+  return optionalString(response, "id");
+}
+
+function readProviderResponseId(
+  event: ProviderEvent,
+): string | undefined {
+  if (
+    event.type === "response.created" ||
+    event.type === "response.done"
+  ) {
+    return isRecord(event.response)
+      ? optionalString(event.response, "id")
+      : undefined;
+  }
+  return optionalString(event, "response_id");
 }
 
 async function executeBusinessRouting(
