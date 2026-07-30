@@ -113,7 +113,7 @@ function parseSentMessages(
 }
 
 describe("OpenAIRealtimeProvider", () => {
-  it("registers only the backend delegation tool and executes each call ID once", async () => {
+  it("registers only the business router tool and executes each call ID once", async () => {
     const harness = createProviderHarness();
     const delegate = vi.fn(async (message: string) =>
       `Backend answer for: ${message}`
@@ -121,7 +121,7 @@ describe("OpenAIRealtimeProvider", () => {
     const session = await harness.provider.openSession(
       {
         sessionId: "delegating-session",
-        delegateToBackend: delegate,
+        handleBusinessRequest: delegate,
       },
       () => {},
     );
@@ -133,7 +133,7 @@ describe("OpenAIRealtimeProvider", () => {
         tools: [
           {
             type: "function",
-            name: "delegate_to_backend",
+            name: "route_business_request",
             parameters: {
               type: "object",
               required: ["user_message"],
@@ -151,7 +151,7 @@ describe("OpenAIRealtimeProvider", () => {
         output: [
           {
             type: "function_call",
-            name: "delegate_to_backend",
+            name: "route_business_request",
             call_id: "call-1",
             arguments: JSON.stringify({
               user_message: "Hi, do you have beef pho?",

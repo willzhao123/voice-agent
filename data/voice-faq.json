@@ -1,0 +1,64 @@
+{
+  "version": "2026-07-30",
+  "restaurant": "Haiyen",
+  "faqs": [
+    {
+      "id": "restaurant.name",
+      "answer": "This is Haiyen.",
+      "matchPhrases": [
+        "restaurant name",
+        "name of the restaurant",
+        "what is your name",
+        "what's your name",
+        "your restaurant called",
+        "what restaurant",
+        "which restaurant",
+        "place called"
+      ]
+    },
+    {
+      "id": "restaurant.hours",
+      "answer": "We're open from noon to 9 PM every day.",
+      "matchPhrases": [
+        "opening hours",
+        "business hours",
+        "what are your hours",
+        "what time do you open",
+        "what time are you open",
+        "what time do you close",
+        "when do you open",
+        "when are you open",
+        "when do you close",
+        "are you open",
+        "open today",
+        "close today",
+        "hours"
+      ]
+    },
+    {
+      "id": "restaurant.parking",
+      "answer": "We don't have parking.",
+      "matchPhrases": [
+        "parking",
+        "where can i park",
+        "can i park",
+        "place to park"
+      ]
+    },
+    {
+      "id": "restaurant.reservations",
+      "answer": "We accept walk-ins only.",
+      "matchPhrases": [
+        "reservation",
+        "reservations",
+        "make a reservation",
+        "take reservations",
+        "reserve a table",
+        "book a table",
+        "booking",
+        "walk in",
+        "walk-in"
+      ]
+    }
+  ]
+}

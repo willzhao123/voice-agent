@@ -14,8 +14,8 @@ import {
 
 const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime";
 const DEFAULT_SESSION_READY_TIMEOUT_MS = 10_000;
-const DELEGATE_TOOL_NAME = "delegate_to_backend";
-const INVALID_DELEGATION_MESSAGE =
+const BUSINESS_ROUTER_TOOL_NAME = "route_business_request";
+const INVALID_ROUTING_MESSAGE =
   "I'm sorry, I couldn't process that request. Please try again.";
 
 export interface OpenAIRealtimeSocket {
@@ -128,7 +128,7 @@ export class OpenAIRealtimeProvider implements RealtimeProvider {
 
         if (
           providerEvent.type === "response.done" &&
-          options.delegateToBackend !== undefined
+          options.handleBusinessRequest !== undefined
         ) {
           const toolCalls = readFunctionCalls(providerEvent);
           for (const toolCall of toolCalls) {
@@ -138,9 +138,9 @@ export class OpenAIRealtimeProvider implements RealtimeProvider {
             handledToolCallIds.add(toolCall.callId);
             toolCallChain = toolCallChain
               .then(async () => {
-                const output = await executeDelegation(
+                const output = await executeBusinessRouting(
                   toolCall,
-                  options.delegateToBackend!,
+                  options.handleBusinessRequest!,
                 );
                 sendProviderEvent({
                   type: "conversation.item.create",
@@ -155,8 +155,8 @@ export class OpenAIRealtimeProvider implements RealtimeProvider {
               .catch(() => {
                 emit({
                   type: "error",
-                  code: "backend_delegation_failed",
-                  message: "Failed to return the backend result",
+                  code: "business_request_routing_failed",
+                  message: "Failed to return the routed business result",
                   recoverable: true,
                 });
               });
@@ -366,10 +366,10 @@ function createSessionUpdateEvent(
       ...(options.instructions === undefined
         ? {}
         : { instructions: options.instructions }),
-      ...(options.delegateToBackend === undefined
+      ...(options.handleBusinessRequest === undefined
         ? {}
         : {
-            tools: [createDelegateTool()],
+            tools: [createBusinessRouterTool()],
             tool_choice: "auto",
           }),
       audio: {
@@ -395,12 +395,12 @@ function createSessionUpdateEvent(
   };
 }
 
-function createDelegateTool(): object {
+function createBusinessRouterTool(): object {
   return {
     type: "function",
-    name: DELEGATE_TOOL_NAME,
+    name: BUSINESS_ROUTER_TOOL_NAME,
     description:
-      "Delegate every request other than greetings, thanks, goodbyes, simple pleasantries, or requests to repeat.",
+      "Route every substantive restaurant request through approved local FAQs or the business backend. Always pass the caller's complete request, including mixed requests.",
     parameters: {
       type: "object",
       properties: {
@@ -415,20 +415,22 @@ function createDelegateTool(): object {
   };
 }
 
-interface DelegationToolCall {
+interface BusinessRouterToolCall {
   callId: string;
   name: string;
   arguments: string;
 }
 
-function readFunctionCalls(event: ProviderEvent): DelegationToolCall[] {
+function readFunctionCalls(
+  event: ProviderEvent,
+): BusinessRouterToolCall[] {
   const response = requireRecord(event, "response");
   const output = response.output;
   if (!Array.isArray(output)) {
     return [];
   }
 
-  const calls: DelegationToolCall[] = [];
+  const calls: BusinessRouterToolCall[] = [];
   for (const item of output) {
     if (!isRecord(item) || item.type !== "function_call") {
       continue;
@@ -442,12 +444,12 @@ function readFunctionCalls(event: ProviderEvent): DelegationToolCall[] {
   return calls;
 }
 
-async function executeDelegation(
-  toolCall: DelegationToolCall,
-  delegateToBackend: (userMessage: string) => Promise<string>,
+async function executeBusinessRouting(
+  toolCall: BusinessRouterToolCall,
+  handleBusinessRequest: (userMessage: string) => Promise<string>,
 ): Promise<string> {
-  if (toolCall.name !== DELEGATE_TOOL_NAME) {
-    return INVALID_DELEGATION_MESSAGE;
+  if (toolCall.name !== BUSINESS_ROUTER_TOOL_NAME) {
+    return INVALID_ROUTING_MESSAGE;
   }
 
   try {
@@ -457,11 +459,11 @@ async function executeDelegation(
       typeof value.user_message !== "string" ||
       value.user_message.trim() === ""
     ) {
-      return INVALID_DELEGATION_MESSAGE;
+      return INVALID_ROUTING_MESSAGE;
     }
-    return await delegateToBackend(value.user_message);
+    return await handleBusinessRequest(value.user_message);
   } catch {
-    return INVALID_DELEGATION_MESSAGE;
+    return INVALID_ROUTING_MESSAGE;
   }
 }
 

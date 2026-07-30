@@ -7,7 +7,12 @@ import Fastify, {
 } from "fastify";
 import { resolve } from "node:path";
 
+import { loadApprovedFaqCatalog } from "./adapters/faq/localFaqCatalog.js";
 import { VoiceSessionManager } from "./application/voiceSessionManager.js";
+import {
+  type ApprovedFaqCatalog,
+  VoiceFaqRouter,
+} from "./application/voiceFaqRouter.js";
 import { HttpBackendAgentFactory } from "./adapters/backend/httpBackendAgent.js";
 import { MockRealtimeProvider } from "./adapters/realtime/mockRealtimeProvider.js";
 import { OpenAIRealtimeProvider } from "./adapters/realtime/openaiRealtimeProvider.js";
@@ -42,6 +47,7 @@ export interface AppDependencies {
   loggerInstance?: FastifyBaseLogger;
   realtimeProvider?: RealtimeProvider;
   backendAgentFactory?: BackendAgentFactory;
+  faqCatalog?: ApprovedFaqCatalog;
   sessionStore?: SessionStore;
   voiceWebsocketOptions?: Partial<VoiceWebsocketOptions>;
   twilioEnabled?: boolean;
@@ -101,6 +107,16 @@ export async function buildApp(
                 authorization: env.BACKEND_AGENT_AUTHORIZATION,
               }),
         }));
+  const faqCatalog = dependencies.faqCatalog ??
+    await loadApprovedFaqCatalog(resolve("data/voice-faq.json"));
+  const faqRouter = new VoiceFaqRouter(faqCatalog);
+  logger.info(
+    {
+      faqVersion: faqRouter.version,
+      faqCount: faqRouter.count,
+    },
+    "Approved voice FAQ catalog loaded",
+  );
   const sessionStore = dependencies.sessionStore ?? new MemorySessionStore();
   const sessionManager = new VoiceSessionManager(
     provider,
@@ -109,6 +125,7 @@ export async function buildApp(
     undefined,
     backendAgentFactory,
     env.BACKEND_AGENT_TIMEOUT_MS,
+    faqRouter,
   );
   const twilioSignatureValidator =
     dependencies.twilioSignatureValidator ??

@@ -7,6 +7,10 @@ import {
   VoiceSessionManager,
   type VoiceSessionEvent,
 } from "../src/application/voiceSessionManager.js";
+import {
+  parseApprovedFaqCatalog,
+  VoiceFaqRouter,
+} from "../src/application/voiceFaqRouter.js";
 import type {
   BackendAgent,
   BackendAgentContext,
@@ -20,7 +24,10 @@ import {
   SessionClosedError,
   SessionNotFoundError,
 } from "../src/shared/errors.js";
-import { createLogger } from "../src/shared/logger.js";
+import {
+  createLogger,
+  type Logger,
+} from "../src/shared/logger.js";
 
 const silentLogger = createLogger("silent");
 
@@ -66,6 +73,22 @@ class TrackingBackendFactory implements BackendAgentFactory {
     this.agents.push(agent);
     return agent;
   }
+}
+
+class RecordingLogger implements Logger {
+  readonly infos: Array<{
+    bindings: Record<string, unknown>;
+    message: string;
+  }> = [];
+
+  info(bindings: object, message: string): void {
+    this.infos.push({
+      bindings: bindings as Record<string, unknown>,
+      message,
+    });
+  }
+
+  error(): void {}
 }
 
 describe("VoiceSessionManager", () => {
@@ -210,10 +233,10 @@ describe("VoiceSessionManager", () => {
     });
 
     await expect(
-      provider.options[0]?.delegateToBackend?.("first request"),
+      provider.options[0]?.handleBusinessRequest?.("first request"),
     ).resolves.toBe("CA-a: first request");
     await expect(
-      provider.options[1]?.delegateToBackend?.("second request"),
+      provider.options[1]?.handleBusinessRequest?.("second request"),
     ).resolves.toBe("CA-b: second request");
 
     expect(backendFactory.contexts).toEqual([
@@ -261,7 +284,142 @@ describe("VoiceSessionManager", () => {
     });
 
     await expect(
-      provider.options[0]?.delegateToBackend?.("menu question"),
+      provider.options[0]?.handleBusinessRequest?.("menu question"),
     ).resolves.toBe(BACKEND_FAILURE_MESSAGE);
+  });
+
+  it("answers FAQs locally, routes mixed work, and carries local answers into later backend requests", async () => {
+    const provider = new CapturingProvider();
+    const backendFactory = new TrackingBackendFactory();
+    const logger = new RecordingLogger();
+    const faqRouter = new VoiceFaqRouter(
+      parseApprovedFaqCatalog({
+        version: "faq-v1",
+        restaurant: "Haiyen",
+        faqs: [
+          {
+            id: "restaurant.hours",
+            answer: "We're open from noon to 9 PM every day.",
+            matchPhrases: ["hours"],
+          },
+        ],
+      }),
+    );
+    const manager = new VoiceSessionManager(
+      provider,
+      new MemorySessionStore(),
+      logger,
+      () => "faq-session",
+      backendFactory,
+      8_000,
+      faqRouter,
+    );
+    await manager.createSession(undefined, undefined, {
+      backendContext: {
+        callSid: "CA-faq",
+        streamSid: "MZ-faq",
+      },
+    });
+    const handleBusinessRequest =
+      provider.options[0]?.handleBusinessRequest;
+    expect(handleBusinessRequest).toBeDefined();
+    if (handleBusinessRequest === undefined) {
+      throw new Error("Business request handler was not configured");
+    }
+
+    await expect(
+      handleBusinessRequest("What are your hours?"),
+    ).resolves.toBe(
+      "We're open from noon to 9 PM every day.",
+    );
+    expect(backendFactory.agents[0]?.messages).toEqual([]);
+
+    const mixedResponse = await handleBusinessRequest(
+      "What are your hours and do you have beef pho?",
+    );
+    expect(mixedResponse).toContain(
+      "We're open from noon to 9 PM every day.",
+    );
+    expect(backendFactory.agents[0]?.messages).toHaveLength(1);
+    expect(backendFactory.agents[0]?.messages[0]).toContain(
+      '"currentRequest":"do you have beef pho"',
+    );
+    expect(backendFactory.agents[0]?.messages[0]).toContain(
+      '"faqVersion":"faq-v1"',
+    );
+    expect(backendFactory.agents[0]?.messages[0]).toContain(
+      '"localAnswer":"We\'re open from noon to 9 PM every day."',
+    );
+
+    await handleBusinessRequest("How much is beef pho?");
+    expect(backendFactory.agents[0]?.messages).toHaveLength(2);
+    expect(backendFactory.agents[0]?.messages[1]).toContain(
+      '"priorApprovedFaqTurns"',
+    );
+    expect(backendFactory.agents[0]?.messages[1]).toContain(
+      '"currentRequest":"How much is beef pho?"',
+    );
+
+    const routeLogs = logger.infos.filter(
+      (entry) =>
+        entry.message === "Voice business request routed",
+    );
+    expect(routeLogs.map((entry) => entry.bindings)).toEqual([
+      expect.objectContaining({
+        route: "local_faq",
+        faqId: "restaurant.hours",
+        faqVersion: "faq-v1",
+        fallbackReason: "none",
+        latencyMs: expect.any(Number),
+      }),
+      expect.objectContaining({
+        route: "mixed",
+        faqId: "restaurant.hours",
+        faqVersion: "faq-v1",
+        fallbackReason: "mixed_request_backend_remainder",
+        latencyMs: expect.any(Number),
+      }),
+      expect.objectContaining({
+        route: "backend",
+        faqVersion: "faq-v1",
+        fallbackReason: "dynamic_or_transactional_request",
+        latencyMs: expect.any(Number),
+      }),
+    ]);
+  });
+
+  it("answers a local FAQ even when no backend agent is configured", async () => {
+    const provider = new CapturingProvider();
+    const faqRouter = new VoiceFaqRouter(
+      parseApprovedFaqCatalog({
+        version: "faq-v1",
+        restaurant: "Haiyen",
+        faqs: [
+          {
+            id: "restaurant.parking",
+            answer: "We don't have parking.",
+            matchPhrases: ["parking"],
+          },
+        ],
+      }),
+    );
+    const manager = new VoiceSessionManager(
+      provider,
+      new MemorySessionStore(),
+      silentLogger,
+      () => "local-only-session",
+      undefined,
+      8_000,
+      faqRouter,
+    );
+    await manager.createSession(undefined, undefined, {
+      backendContext: {},
+    });
+
+    await expect(
+      provider.options[0]?.handleBusinessRequest?.(
+        "Is parking available?",
+      ),
+    ).resolves.toBe("We don't have parking.");
   });
 });

@@ -441,14 +441,14 @@ describe("GET /v1/twilio/media", () => {
     expect(provider.options).toMatchObject({
       sessionId: expect.any(String),
       instructions: expect.stringContaining(
-        "For every other request, call delegate_to_backend",
+        "call route_business_request",
       ),
       audioFormat: {
         encoding: "g711_ulaw",
         sampleRate: 8_000,
       },
       turnDetection: "server_vad",
-      delegateToBackend: expect.any(Function),
+      handleBusinessRequest: expect.any(Function),
     });
     expect(provider.audio).toEqual([inboundAudio]);
     const outboundAudio = Buffer.from([0x10, 0x20, 0x30]);

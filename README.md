@@ -15,6 +15,8 @@ Browser
 Fastify WebSocket adapter
   ▼
 VoiceSessionManager
+  ├── approved local FAQ router
+  ├── BackendAgent port ──► external orchestrator
   ├── SessionStore port ──► in-memory adapter
   └── RealtimeProvider port
                          ├── mock adapter
@@ -25,6 +27,7 @@ Twilio incoming call
   │  signed Media Stream WebSocket
   ▼
 Twilio adapter ──► VoiceSessionManager
+                        ├── approved local FAQ router
                         ├── one BackendAgent per call
                         └── RealtimeProvider
 ```
@@ -39,12 +42,13 @@ session are processed sequentially, and sessions have independent provider
 connections, listeners, state, and buffered audio. The session manager can
 close all active provider connections during application shutdown.
 
-For Twilio calls, the realtime model is a receptionist rather than a business
-authority. It may handle only greetings, thanks, goodbyes, simple pleasantries,
-and repeat requests. Every other request is sent through the single
-`delegate_to_backend` tool to an isolated `BackendAgent`. The concrete business
-orchestrator remains external to this repository and is connected through an
-HTTP adapter.
+For browser and Twilio calls, the realtime model is a receptionist rather than
+a business authority. It may handle only greetings, thanks, goodbyes, simple
+pleasantries, and repeat requests. Every substantive request is sent through
+the single `route_business_request` tool. The application answers
+high-confidence approved FAQs locally, asks for clarification on ambiguous FAQ
+matches, and sends dynamic or transactional work to an isolated
+`BackendAgent`. The concrete business orchestrator remains external.
 
 ## Directory structure
 
@@ -52,10 +56,14 @@ HTTP adapter.
 public/
   index.html                         # Minimal browser test UI
   app.js                             # WebSocket, microphone, and audio playback
+data/
+  voice-faq.json                     # Versioned approved static voice FAQ content
 src/
   adapters/
     backend/
       httpBackendAgent.ts            # Existing orchestrator HTTP adapter
+    faq/
+      localFaqCatalog.ts              # Startup loader for approved FAQ data
     realtime/
       mockRealtimeProvider.ts        # Credential-free deterministic test provider
       openaiRealtimeProvider.ts      # OpenAI Realtime protocol adapter
@@ -69,7 +77,8 @@ src/
     websocket/
       voiceWebsocketRoute.ts         # Validated public WebSocket protocol
   application/
-    voiceReceptionist.ts             # Receptionist scope and delegation prompt
+    voiceFaqRouter.ts                 # Deterministic FAQ/backend routing
+    voiceReceptionist.ts             # Receptionist scope and routing prompt
     voiceSessionManager.ts           # Session orchestration and isolation
   config/
     env.ts                           # Environment parsing and validation
@@ -108,7 +117,7 @@ Copy `.env.example` to `.env`. The local `.env` file is ignored by Git.
 | `TWILIO_AUTH_TOKEN` | unset | Server-only secret used to validate Twilio signatures |
 | `PUBLIC_BASE_URL` | unset | Configured public HTTPS origin used for Twilio signatures and TwiML |
 | `TWILIO_VALIDATE_SIGNATURES` | `true` | Validate Twilio webhook and WebSocket signatures |
-| `VOICE_INSTRUCTIONS` | `You are a helpful voice assistant.` | Context prepended to the enforced Twilio receptionist instructions |
+| `VOICE_INSTRUCTIONS` | `You are a helpful voice assistant.` | Context prepended to the enforced receptionist instructions |
 | `MAX_JSON_MESSAGE_BYTES` | `65536` | Maximum incoming JSON frame size |
 | `MAX_AUDIO_FRAME_BYTES` | `262144` | Maximum incoming binary audio-frame size |
 | `IDLE_SESSION_TIMEOUT_MS` | `60000` | Close a connection with no client frames |
@@ -396,13 +405,19 @@ Twilio event schemas, stream SIDs, sequence numbers, ordering, frame size,
 backpressure, idle timeout, maximum duration, and heartbeat state are all
 validated or bounded.
 
-### Receptionist and backend delegation
+### Receptionist, local FAQs, and backend delegation
 
 The realtime model receives exactly one domain function:
-`delegate_to_backend(user_message)`. Its instructions allow direct replies only
-for greetings, thanks, goodbyes, simple pleasantries, and repeat requests.
-Mixed requests such as “Hi, do you have beef pho?” must delegate the complete
-request.
+`route_business_request(user_message)`. Its instructions allow direct replies
+only for greetings, thanks, goodbyes, simple pleasantries, and repeat requests.
+The complete substantive request is routed deterministically:
+
+- High-confidence static FAQ matches use only `data/voice-faq.json`.
+- Ambiguous FAQ matches return a short clarification question.
+- Menu availability, prices, orders, payments, customer information, and other
+  unsupported facts go to the backend.
+- Mixed requests combine the local FAQ answer with the backend answer for the
+  remaining clauses.
 
 Each function `call_id` is recorded before execution, so a duplicated provider
 event cannot execute the backend operation twice. The backend result is sent
@@ -430,9 +445,11 @@ It must return:
 
 The application creates a new `BackendAgent` for every call and includes a
 unique `sessionId`, allowing the existing orchestrator to keep conversation
-history isolated. `streamSid` is retained locally for lifecycle and structured
-latency/error logs but is not sent in the HTTP body. Caller messages are never
-included in those logs.
+history isolated. Approved local FAQ turns are also retained in process for the
+voice session and included as context in later backend messages. This preserves
+context even when the backend does not persist sessions. `streamSid` is
+retained locally for lifecycle and structured logs but is not sent in the HTTP
+body. Caller messages are never included in logs.
 
 ### Audio-format differences
 
@@ -548,8 +565,9 @@ provider-specific event payloads.
 - `SIGINT` and `SIGTERM` close Fastify and all active realtime connections.
 - Session lifecycle and failures use structured logs with `sessionId` where one
   has been allocated.
-- Delegation logs include `sessionId`, `callSid`, `streamSid`, tool name,
-  latency, and errors without recording the caller's request.
+- Routing logs include `sessionId`, `callSid`, `streamSid`, selected route, FAQ
+  ID and version, latency, and fallback reason without recording the caller's
+  request. Backend errors are logged separately.
 
 ## Known limitations
 

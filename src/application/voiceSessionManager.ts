@@ -6,6 +6,10 @@ import {
   createVoiceSession,
   type VoiceSession,
 } from "../domain/voiceSession.js";
+import {
+  type VoiceRequestDecision,
+  VoiceFaqRouter,
+} from "./voiceFaqRouter.js";
 import type {
   BackendAgent,
   BackendAgentContext,
@@ -34,6 +38,12 @@ interface ActiveSession {
   closePromise: Promise<void> | undefined;
 }
 
+interface LocalFaqHistoryTurn {
+  readonly localAnswer: string;
+  readonly faqIds: readonly string[];
+  readonly faqVersion: string;
+}
+
 export const BACKEND_FAILURE_MESSAGE =
   "I'm sorry, I can't access that information right now. Please try again in a moment.";
 
@@ -48,6 +58,7 @@ export class VoiceSessionManager {
     private readonly createId: () => string = randomUUID,
     private readonly backendAgentFactory?: BackendAgentFactory,
     private readonly backendTimeoutMs = 8_000,
+    private readonly faqRouter?: VoiceFaqRouter,
   ) {}
 
   async createSession(
@@ -71,6 +82,7 @@ export class VoiceSessionManager {
 
     await this.sessionStore.save(session);
     let backendAgent: BackendAgent | undefined;
+    const localFaqHistory: LocalFaqHistoryTurn[] = [];
 
     try {
       if (backendContext !== undefined) {
@@ -87,11 +99,12 @@ export class VoiceSessionManager {
           ...(backendContext === undefined
             ? {}
             : {
-                delegateToBackend: (userMessage: string) =>
-                  this.delegateToBackend(
+                handleBusinessRequest: (userMessage: string) =>
+                  this.handleBusinessRequest(
                     session.id,
                     backendContext,
                     backendAgent,
+                    localFaqHistory,
                     userMessage,
                   ),
               }),
@@ -302,6 +315,80 @@ export class VoiceSessionManager {
     }
   }
 
+  private async handleBusinessRequest(
+    sessionId: string,
+    context: Omit<BackendAgentContext, "sessionId">,
+    backendAgent: BackendAgent | undefined,
+    localFaqHistory: LocalFaqHistoryTurn[],
+    userMessage: string,
+  ): Promise<string> {
+    const startedAt = Date.now();
+    const decision = this.faqRouter?.route(userMessage) ??
+      createBackendOnlyDecision(userMessage);
+    let response: string;
+
+    switch (decision.route) {
+      case "local_faq":
+        response = decision.localResponse ?? BACKEND_FAILURE_MESSAGE;
+        recordLocalFaqTurn(
+          localFaqHistory,
+          response,
+          decision,
+        );
+        break;
+      case "clarification":
+        response = decision.localResponse ?? BACKEND_FAILURE_MESSAGE;
+        break;
+      case "backend":
+        response = await this.delegateToBackend(
+          sessionId,
+          context,
+          backendAgent,
+          buildBackendRequest(
+            decision.backendRequest ?? userMessage,
+            localFaqHistory,
+          ),
+        );
+        break;
+      case "mixed": {
+        const localResponse =
+          decision.localResponse ?? BACKEND_FAILURE_MESSAGE;
+        recordLocalFaqTurn(
+          localFaqHistory,
+          localResponse,
+          decision,
+        );
+        const backendResponse = await this.delegateToBackend(
+          sessionId,
+          context,
+          backendAgent,
+          buildBackendRequest(
+            decision.backendRequest ?? userMessage,
+            localFaqHistory,
+          ),
+        );
+        response = `${localResponse} ${backendResponse}`;
+        break;
+      }
+    }
+
+    this.logger.info(
+      {
+        sessionId,
+        callSid: context.callSid,
+        streamSid: context.streamSid,
+        route: decision.route,
+        faqId: decision.faqIds[0] ?? null,
+        faqIds: decision.faqIds,
+        faqVersion: decision.faqVersion,
+        latencyMs: Date.now() - startedAt,
+        fallbackReason: decision.fallbackReason,
+      },
+      "Voice business request routed",
+    );
+    return response;
+  }
+
   private async delegateToBackend(
     sessionId: string,
     context: Omit<BackendAgentContext, "sessionId">,
@@ -313,7 +400,7 @@ export class VoiceSessionManager {
       sessionId,
       callSid: context.callSid,
       streamSid: context.streamSid,
-      tool: "delegate_to_backend",
+      operation: "backend_agent.chat",
     };
 
     if (backendAgent === undefined) {
@@ -356,6 +443,47 @@ export class VoiceSessionManager {
       return BACKEND_FAILURE_MESSAGE;
     }
   }
+}
+
+function createBackendOnlyDecision(
+  userMessage: string,
+): VoiceRequestDecision {
+  return {
+    route: "backend",
+    faqIds: [],
+    faqVersion: "unavailable",
+    fallbackReason: "faq_router_unavailable",
+    backendRequest: userMessage.trim(),
+  };
+}
+
+function recordLocalFaqTurn(
+  history: LocalFaqHistoryTurn[],
+  localAnswer: string,
+  decision: VoiceRequestDecision,
+): void {
+  history.push({
+    localAnswer,
+    faqIds: decision.faqIds,
+    faqVersion: decision.faqVersion,
+  });
+}
+
+function buildBackendRequest(
+  currentRequest: string,
+  history: readonly LocalFaqHistoryTurn[],
+): string {
+  if (history.length === 0) {
+    return currentRequest;
+  }
+
+  return [
+    "Answer the current request using this approved local FAQ context from the same voice session.",
+    JSON.stringify({
+      priorApprovedFaqTurns: history,
+      currentRequest,
+    }),
+  ].join("\n");
 }
 
 async function withTimeout<T>(
